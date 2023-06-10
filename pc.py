@@ -1,21 +1,20 @@
 import pyautogui
+import cv2
+import numpy as np
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.
 
 class Monitor:
-    def __init__(self, window_title, window_size, window_location):
-        window = self.find_window(window_title)
-        
+    def __init__(self, window_title, window_location, window_size):
         width, height = window_size
         left, top = window_location
+        self.region = (left, top, width, height)
 
+        window = self.find_window(window_title)
         self.activate_window(window)
         window.resizeTo(width, height)
         window.moveTo(left, top)
-
-        self.region = (left, top, width, height)
-        # screenshot = pyautogui.screenshot("screenshot.png", region=self.region)
 
     @staticmethod
     def find_window(window_title):
@@ -32,6 +31,11 @@ class Monitor:
             window.minimize()
             window.maximize()
             window.restore()
+
+    def capture(self):
+        img = pyautogui.screenshot(region=self.region)
+        img = np.array(img, dtype=np.int32)
+        return img
 
 
 class Keyboard:
