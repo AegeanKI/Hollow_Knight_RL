@@ -11,10 +11,10 @@ class Monitor:
         left, top = window_location
         self.region = (left, top, width, height)
 
-        window = self.find_window(window_title)
-        self.activate_window(window)
-        window.resizeTo(width, height)
-        window.moveTo(left, top)
+        self.window = self.find_window(window_title)
+        self.activate_window(self.window)
+        self.window.resizeTo(width, height)
+        self.window.moveTo(left, top)
 
     @staticmethod
     def find_window(window_title):
@@ -34,14 +34,22 @@ class Monitor:
 
     def capture(self):
         img = pyautogui.screenshot(region=self.region)
-        img = np.array(img, dtype=np.int32)
+        img = np.array(img, dtype=np.float32)
         return img
+
+
+    def find(self, target_region, target_image):
+        return pyautogui.locateOnScreen(target_image,
+                                        region=target_region,
+                                        confidence=0.95)
+
+    def is_active(self):
+        return self.window.isActive
 
 
 class Keyboard:
     def __init__(self, keys):
         self.keys = keys
-
 
     def execute(self, action):
         assert len(action) == len(self.keys), f"wrong action size"
