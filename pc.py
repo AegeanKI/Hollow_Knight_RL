@@ -7,14 +7,12 @@ pyautogui.PAUSE = 0.
 
 class Monitor:
     def __init__(self, window_title, window_location, window_size):
-        width, height = window_size
-        left, top = window_location
-        self.region = (left, top, width, height)
+        self.width, self.height = window_size
+        self.left, self.top = window_location
+        self.region = (self.left, self.top, self.width, self.height)
 
         self.window = self.find_window(window_title)
-        self.activate_window(self.window)
-        self.window.resizeTo(width, height)
-        self.window.moveTo(left, top)
+        self.activate_move_to_desired()
 
     @staticmethod
     def find_window(window_title):
@@ -45,6 +43,12 @@ class Monitor:
 
     def is_active(self):
         return self.window.isActive
+
+    
+    def activate_move_to_desired(self):
+        self.activate_window(self.window)
+        self.window.resizeTo(self.width, self.height)
+        self.window.moveTo(self.left, self.top)
 
 
 class Keyboard:

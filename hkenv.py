@@ -1,6 +1,8 @@
+import time
+
 import pyautogui
 import cv2
-import time
+import torch
 import numpy as np
 
 from utils import Counter, unpackbits
@@ -12,7 +14,7 @@ pyautogui.PAUSE = 0.
 class Hotkey:
     KEYS = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
     NUM = 2 ** len(KEYS)
-    ALL_POSSIBLE = utils.unpackbits(np.arange(2 ** len(KEYS)), len(KEYS))
+    ALL_POSSIBLE = unpackbits(np.arange(2 ** len(KEYS)), len(KEYS))
 
     NULL = ALL_POSSIBLE[0]
     UP = ALL_POSSIBLE[1]
@@ -31,10 +33,11 @@ class HKEnv():
     WINDOW_LOCATION = (0, 0)
     CHARACTER_FULL_HP = 9
 
-    def __init__(self, obs_size):
+    def __init__(self, obs_size, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
         self.keyboard = Keyboard(Hotkey.KEYS)
         self.obs_size = obs_size
+        self.device = device
 
         self._initialize()
         self._reset_env()
@@ -65,8 +68,8 @@ class HKEnv():
 
 
         # for reward
-        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00001, high=0.01, low=0.001)
-        self.character_remain_weight_counter = Counter(init=0.0001, increase=0.00001, high=0.01, low=0.001)
+        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00001, high=0.01, low=0.005)
+        self.character_remain_weight_counter = Counter(init=0.0001, increase=0.000001, high=0.0002, low=0.0001)
         self.win_reward = 1
         self.lose_reward = -1
 
@@ -87,8 +90,11 @@ class HKEnv():
         self.prev_character_remain = self.CHARACTER_FULL_HP
         self._counter_reset()
         self.keyboard.execute(Hotkey.NULL)
+        # self.prev_time = time.time()
 
     def observe(self):
+        # cur_time = time.time()
+        # print(f"time = {cur_time - self.prev_time}")
         frame = self.monitor.capture()
 
         enemy_remain = self._get_enemy_hp(frame)
@@ -96,17 +102,24 @@ class HKEnv():
 
         obs = cv2.resize(frame, self.obs_size, interpolation=cv2.INTER_AREA)
         obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-        obs = np.moveaxis(obs, -1, 0)
+        obs = torch.from_numpy(obs).to(self.device)
+
+        # self.prev_time = cur_time
         return obs, enemy_remain, character_remain
 
     def _start(self):
         while True:
-            find = self.monitor.find(self.menu_region, "menu_badge.png")
+            find = self.monitor.find(self.menu_region, "locator\menu_badge.png")
             if find:
                 break
 
+            stop = False
             while not self.monitor.is_active():
+                stop = True
                 time.sleep(10)
+
+            if stop:
+                self.monitor.activate_move_to_desired()
 
             self.keyboard.execute(Hotkey.UP)
             time.sleep(0.1)
@@ -141,10 +154,11 @@ class HKEnv():
         self._start()
         time.sleep(4)
         obs0, enemy_remain, character_remain = self.observe()
-        time.sleep(0.1)
+        time.sleep(0.01)
         obs1, enemy_remain, character_remain = self.observe()
-        time.sleep(0.1)
+        time.sleep(0.01)
         obs2, enemy_remain, character_remain = self.observe()
+        time.sleep(0.01)
         return obs0, obs1, obs2
 
     def close(self):
@@ -165,7 +179,7 @@ class HKEnv():
         character_hp_reward = (character_remain + 1 - self.prev_character_remain) * self.character_remain_weight_counter.val
         reward = done_reward + enemy_hp_reward + character_hp_reward
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {reward = }")
-        return reward
+        return torch.Tensor([reward]).to(self.device)
 
     def _counter_step(self):
         self.enemy_remain_weight_counter.step()
