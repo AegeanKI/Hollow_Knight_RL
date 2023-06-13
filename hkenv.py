@@ -1,8 +1,9 @@
 import time
+import math
 
-import pyautogui
 import cv2
 import torch
+import pyautogui
 import numpy as np
 
 from utils import Counter, unpackbits
@@ -13,8 +14,10 @@ pyautogui.PAUSE = 0.
 
 class Hotkey:
     KEYS = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
-    NUM = 2 ** len(KEYS)
-    ALL_POSSIBLE = unpackbits(np.arange(2 ** len(KEYS)), len(KEYS))
+    KEYS_NUM = len(KEYS)
+
+    ALL_POSSIBLE_NUM = 2 ** KEYS_NUM
+    ALL_POSSIBLE = unpackbits(np.arange(2 ** KEYS_NUM), KEYS_NUM)
 
     NULL = ALL_POSSIBLE[0]
     UP = ALL_POSSIBLE[1]
@@ -26,6 +29,10 @@ class Hotkey:
     DASH = ALL_POSSIBLE[64]
     SPELL = ALL_POSSIBLE[128]
     SDASH = ALL_POSSIBLE[256]
+
+    @staticmethod
+    def idx_to_hotkey(idx):
+        return Hotkey.ALL_POSSIBLE[idx]
 
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
@@ -68,7 +75,7 @@ class HKEnv():
 
 
         # for reward
-        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00001, high=0.01, low=0.005)
+        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00002, high=0.01, low=0.005)
         self.character_remain_weight_counter = Counter(init=0.0001, increase=0.000001, high=0.0002, low=0.0001)
         self.win_reward = 1
         self.lose_reward = -1
@@ -129,8 +136,8 @@ class HKEnv():
         self.keyboard.execute(Hotkey.JUMP)
         self.keyboard.execute(Hotkey.NULL)
 
-    def step(self, action_id):
-        self.keyboard.execute(Hotkey.ALL_POSSIBLE[action_id])
+    def step(self, action_idx):
+        self.keyboard.execute(Hotkey.idx_to_hotkey(action_idx))
         obs, enemy_remain, character_remain = self.observe()
 
         win = (enemy_remain == 0)
@@ -149,17 +156,19 @@ class HKEnv():
         self.prev_enemy_remain = enemy_remain
         return obs, reward, done, None
 
-    def reset(self):
+    def reset(self, obs_interval):
         self._reset_env()
         self._start()
         time.sleep(4)
         obs0, enemy_remain, character_remain = self.observe()
-        time.sleep(0.01)
+        time.sleep(0.02 + obs_interval - 0.07)
         obs1, enemy_remain, character_remain = self.observe()
-        time.sleep(0.01)
+        time.sleep(0.02 + obs_interval - 0.07)
         obs2, enemy_remain, character_remain = self.observe()
-        time.sleep(0.01)
-        return obs0, obs1, obs2
+        time.sleep(0.02 + obs_interval - 0.07)
+
+        act = Hotkey.NULL.to(self.device)
+        return obs0, obs1, obs2, act, act, act
 
     def close(self):
         self._reset_env()
@@ -170,7 +179,7 @@ class HKEnv():
 
         done_reward = 0
         if win:
-            done_reward = done_reward + self.win_reward
+            done_reward = done_reward + self.win_reward + math.log(character_remain)
         if lose:
             done_reward = done_reward + self.lose_reward
 

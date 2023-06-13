@@ -1,5 +1,5 @@
-import pyautogui
 import cv2
+import pyautogui
 import numpy as np
 
 pyautogui.FAILSAFE = False

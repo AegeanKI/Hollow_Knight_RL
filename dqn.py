@@ -1,23 +1,28 @@
 import time
+
 import torch
 import torch.nn as nn
 import numpy as np
+
 from network import ResNet18
+from hkenv import Hotkey
+from utils import Memory
 
 class DQN(nn.Module):
-    # def __init__(self, n_states, n_actions, n_hidden, batch_size, lr, epsilon, gamma, target_replace_iter, memory_capacity):
-    def __init__(self, state_size, n_actions, batch_size, lr, epsilon,
+    def __init__(self, state_size, n_actions, condition_size, batch_size, lr, epsilon,
                  gamma, target_replace_iter, memory_capacity, device):
         super().__init__()
-        # self.eval_net, self.target_net = Net(n_states, n_actions, n_hidden), Net(n_states, n_actions, n_hidden)
-        self.eval_net, self.target_net = ResNet18(n_actions).to(device), ResNet18(n_actions).to(device)
-
+        self.condition_size = condition_size
         self.state_size = state_size
-        self.n_states = torch.prod(torch.Tensor(state_size)).to(torch.int64)
-        self.memory = torch.zeros((memory_capacity, self.n_states.item() * 2 + 2)).to(device)
+        self.n_condition = torch.prod(torch.Tensor(condition_size).to(torch.int64))
+        self.n_states = torch.prod(torch.Tensor(state_size).to(torch.int64))
+
+        self.eval_net = ResNet18(n_actions, self.n_condition).to(device)
+        self.target_net = ResNet18(n_actions, self.n_condition).to(device)
+
+        self.memory = Memory(memory_capacity)
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.loss_func = nn.MSELoss()
-        self.memory_counter = 0
         self.learn_step_counter = 0
 
         self.n_actions = n_actions
@@ -32,54 +37,61 @@ class DQN(nn.Module):
         self.warmup()
 
     def warmup(self):
-        fake_input = torch.zeros(self.state_size).unsqueeze(0).to(self.device)
-        q_eval = self.eval_net(fake_input)
-        q_next = self.target_net(fake_input).detach()
-        q_target = q_eval
-        loss = self.loss_func(q_eval, q_target)
+        for _ in range(3):
+            fake_input = torch.zeros(self.state_size).unsqueeze(0).to(self.device)
+            fake_condition = torch.zeros(self.n_condition).to(self.device)
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+            q_eval = self.eval_net(fake_input, fake_condition)
+            q_next = self.target_net(fake_input, fake_condition).detach()
+            loss = self.loss_func(q_eval, q_eval)
+            loss.backward()
+            # self.optimizer.step()
 
-    def choose_action(self, state):
-        x = state.float().unsqueeze(0)
+            self.optimizer.zero_grad()
+        for _ in range(self.memory_capacity * 2):
+            self.memory.store(torch.zeros(self.n_states * 2 + self.n_condition + 2))
+
+    def choose_action(self, state, condition, use_epsilon=True):
         # epsilon-greedy
         if torch.rand(1) < self.epsilon:
-            action = torch.randint(self.n_actions, (1,))
+            action = torch.randint(self.n_actions, (1,))[0]
         else:
-            pass_net_time = time.time()
-            actions_value = self.eval_net(x)
+            actions_value = self.eval_net(state.unsqueeze(0), condition)
             action = torch.argmax(actions_value)
-        return torch.Tensor([action]).to(torch.int64).to(self.device)
+        action = torch.Tensor(action).to(torch.int64).to(self.device)
+        cond = Hotkey.idx_to_hotkey(action).to(self.device)
+        return action, cond
 
 
-    def store_transition(self, state, action, reward, next_state):
-        transition = torch.hstack((state.flatten(), action, reward, next_state.flatten()))
+    def store_transition(self, state, condition, action, reward, next_state):
+        trans = torch.hstack((state.flatten(), condition, action, reward, next_state.flatten()))
+        self.memory.store(trans)
 
-        index = self.memory_counter % self.memory_capacity
-        self.memory[index, :] = transition
-        self.memory_counter += 1
+    def random_sample_transition(self):
+        idx = torch.randint(self.memory_capacity, (1,))[0]
+        trans = self.memory.get(idx)
 
+        state = trans[:self.n_states].reshape(self.state_size).to(self.device)
+        condition = trans[self.n_states:self.n_states + self.n_condition].to(torch.int64).to(self.device)
+        action = trans[self.n_states + self.n_condition].to(torch.int64).to(self.device)
+        reward = trans[self.n_states + self.n_condition + 1].to(self.device)
+        next_state = trans[-self.n_states:].reshape(self.state_size).to(self.device)
+
+        return state, condition, action, reward, next_state
+
+    @property
+    def can_learn(self):
+        return self.memory.is_full
 
     def learn(self):
-        start = time.time()
-        sample_index = np.random.choice(self.memory_capacity, self.batch_size)
+        state, condition, action, reward, next_state = self.random_sample_transition()
 
-        b_memory = self.memory[sample_index, :]
-        b_state = b_memory[:, :self.n_states]
-        b_action = b_memory[:, self.n_states:self.n_states+1].to(torch.int64)
-        b_reward = b_memory[:, self.n_states+1]
-        b_next_state = b_memory[:, -self.n_states:]
+        next_condition = torch.cat((condition, Hotkey.idx_to_hotkey(action).to(self.device)))
+        next_condition = next_condition[-self.n_condition:]
 
-        b_state = b_state.reshape(self.state_size).unsqueeze(0)
-        # b_action = b_action[0]
-        # b_reward = b_reward[0]
-        b_next_state = b_next_state.reshape(self.state_size).unsqueeze(0)
-
-        q_eval = torch.gather(self.eval_net(b_state), 1, b_action)
-        q_next = self.target_net(b_next_state).detach()
-        q_target = b_reward + self.gamma * q_next.max(1)[0].view(self.batch_size, 1)
+        q_eval = self.eval_net(state.unsqueeze(0), condition)[action]
+        q_next = self.target_net(next_state.unsqueeze(0), next_condition).detach()
+        q_target = reward + self.gamma * q_next.max()
         loss = self.loss_func(q_eval, q_target)
 
         self.optimizer.zero_grad()
