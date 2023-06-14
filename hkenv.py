@@ -111,6 +111,7 @@ class HKEnv():
         obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
         obs = torch.from_numpy(obs).to(self.device)
 
+        del frame
         # self.prev_time = cur_time
         return obs, enemy_remain, character_remain
 
@@ -136,6 +137,8 @@ class HKEnv():
         self.keyboard.execute(Hotkey.JUMP)
         self.keyboard.execute(Hotkey.NULL)
 
+        del find, stop
+
     def step(self, action_idx):
         self.keyboard.execute(Hotkey.idx_to_hotkey(action_idx))
         obs, enemy_remain, character_remain = self.observe()
@@ -154,7 +157,10 @@ class HKEnv():
 
         self.prev_character_remain = character_remain
         self.prev_enemy_remain = enemy_remain
-        return obs, reward, done, None
+
+        del character_remain
+        del win, lose
+        return obs, reward, done, enemy_remain
 
     def reset(self, obs_interval):
         self._reset_env()
@@ -187,6 +193,8 @@ class HKEnv():
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (character_remain + 1 - self.prev_character_remain) * self.character_remain_weight_counter.val
         reward = done_reward + enemy_hp_reward + character_hp_reward
+        del win, lose
+        del enemy_hp_reward, character_hp_reward
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {reward = }")
         return torch.Tensor([reward]).to(self.device)
 
@@ -211,12 +219,15 @@ class HKEnv():
             else:
                 self.is_enemy_full_hp = False
 
+        del bar, channel_diff
+        del enemy_full
         return enemy_remain
 
 
     def _get_character_hp(self, frame):
         bar = frame[self.character_hp_slice]
         remain = np.sum(bar > 150)
+        del bar
         return remain
 
 

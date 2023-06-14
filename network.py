@@ -12,11 +12,12 @@ class ResNet18(nn.Module):
 
         self.model = nn.Sequential(*(list(self.model.children())[:-1]))
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     def forward(self, x, condition):
         out = self.model(x)
-        # print(f"{out.flatten().shape = }")
-        # print(f"{condition.shape = }")
         out = torch.cat((out.flatten(), condition.flatten()))
         out = self.fc(out)
         return out

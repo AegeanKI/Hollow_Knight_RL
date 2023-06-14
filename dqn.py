@@ -7,6 +7,7 @@ import numpy as np
 from network import ResNet18
 from hkenv import Hotkey
 from utils import Memory
+from pc import FileAdmin
 
 class DQN(nn.Module):
     def __init__(self, state_size, n_actions, condition_size, batch_size, lr, epsilon,
@@ -20,6 +21,7 @@ class DQN(nn.Module):
         self.eval_net = ResNet18(n_actions, self.n_condition).to(device)
         self.target_net = ResNet18(n_actions, self.n_condition).to(device)
 
+        self.memory_capacity = memory_capacity
         self.memory = Memory(memory_capacity)
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.loss_func = nn.MSELoss()
@@ -31,12 +33,12 @@ class DQN(nn.Module):
         self.epsilon = epsilon
         self.gamma = gamma
         self.target_replace_iter = target_replace_iter
-        self.memory_capacity = memory_capacity
         self.device = device
 
         self.warmup()
 
     def warmup(self):
+        print("warm up", end='\r')
         for _ in range(3):
             fake_input = torch.zeros(self.state_size).unsqueeze(0).to(self.device)
             fake_condition = torch.zeros(self.n_condition).to(self.device)
@@ -48,12 +50,16 @@ class DQN(nn.Module):
             # self.optimizer.step()
 
             self.optimizer.zero_grad()
-        for _ in range(self.memory_capacity * 2):
-            self.memory.store(torch.zeros(self.n_states * 2 + self.n_condition + 2))
+        # for _ in range(self.memory_capacity * 2):
+        #     self.memory.store(torch.zeros(self.n_states * 2 + self.n_condition + 2))
 
-    def choose_action(self, state, condition, use_epsilon=True):
+        print("warm up completed")
+        del fake_input, fake_condition
+        del q_eval, q_next, loss
+
+    def choose_action(self, state, condition, evaluate=False):
         # epsilon-greedy
-        if torch.rand(1) < self.epsilon:
+        if torch.rand(1) < self.epsilon and not evaluate:
             action = torch.randint(self.n_actions, (1,))[0]
         else:
             actions_value = self.eval_net(state.unsqueeze(0), condition)
@@ -65,11 +71,12 @@ class DQN(nn.Module):
 
     def store_transition(self, state, condition, action, reward, next_state):
         trans = torch.hstack((state.flatten(), condition, action, reward, next_state.flatten()))
-        self.memory.store(trans)
+        self.memory.append(trans.cpu())
+        del trans
 
     def random_sample_transition(self):
         idx = torch.randint(self.memory_capacity, (1,))[0]
-        trans = self.memory.get(idx)
+        trans = self.memory[idx]
 
         state = trans[:self.n_states].reshape(self.state_size).to(self.device)
         condition = trans[self.n_states:self.n_states + self.n_condition].to(torch.int64).to(self.device)
@@ -77,11 +84,12 @@ class DQN(nn.Module):
         reward = trans[self.n_states + self.n_condition + 1].to(self.device)
         next_state = trans[-self.n_states:].reshape(self.state_size).to(self.device)
 
+        del idx, trans
         return state, condition, action, reward, next_state
 
     @property
     def can_learn(self):
-        return self.memory.is_full
+        return len(self.memory) == self.memory_capacity
 
     def learn(self):
         state, condition, action, reward, next_state = self.random_sample_transition()
@@ -102,3 +110,36 @@ class DQN(nn.Module):
         if self.learn_step_counter % self.target_replace_iter == 0:
             print(f"copy target from eval")
             self.target_net.load_state_dict(self.eval_net.state_dict())
+
+        del state, condition, action, reward, next_state, next_condition
+        del q_eval, q_next, q_target, loss
+
+    def save(self, name):
+        print(f"saving net", end='\r')
+        FileAdmin.safe_save_net(self.eval_net, f"{name}_eval_net.pt")
+        print(f"saving net completed")
+
+        # time.sleep(1)
+        # torch.save(self.eval_net.cpu().state_dict(), f"{name}_eval_net.pt")
+        # self.eval_net = self.eval_net.to(self.device)
+
+        print(f"saving memory")
+        self.memory.save(f"{name}_memory")
+        print(f"saving memory completed")
+
+    def load(self, name):
+        print(f"loading net", end='\r')
+        self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{name}_eval_net.pt")
+        self.target_net = FileAdmin.safe_load_net(self.target_net, f"{name}_eval_net.pt")
+        print(f"loading net completed")
+
+        # self.eval_net.load_state_dict(torch.load(f"{name}_eval_net.pt"))
+        # self.target_net.load_state_dict(torch.load(f"{name}_eval_net.pt"))
+        # self.eval_net = self.eval_net.to(self.device)
+        # self.target_net = self.target_net.to(self.device)
+
+        print(f"loading memory")
+        self.memory.load(f"{name}_memory")
+        print(f"loading memory completed")
+
+        self.warmup()
