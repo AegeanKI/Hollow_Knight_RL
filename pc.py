@@ -1,13 +1,13 @@
 import os
 import sys
 import time
+
 import shutil
 import pickle
-
 import cv2
 import pyautogui
-import numpy as np
 import torch
+import numpy as np
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.

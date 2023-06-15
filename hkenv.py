@@ -6,8 +6,8 @@ import torch
 import pyautogui
 import numpy as np
 
-from utils import Counter, unpackbits
 from pc import Monitor, Keyboard
+from utils import Counter, unpackbits
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.

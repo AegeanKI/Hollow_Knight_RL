@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from network import resnet18
+from pc import FileAdmin
 from hkenv import Hotkey
 from utils import Memory
-from pc import FileAdmin
+from network import resnet18
 
 class DQN(nn.Module):
     def __init__(self, state_size, n_frames, n_actions, condition_size, batch_size, lr, epsilon,

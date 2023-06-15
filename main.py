@@ -1,18 +1,25 @@
+import os
 import sys
 import time
-import cv2
 
-import hkenv
+import cv2
 import torch
+import psutil
+import hkenv
 import numpy as np
 
-from torch.backends import cudnn
 from chainer import serializers
+from torch.backends import cudnn
 from dqn import DQN
-from collections import namedtuple, deque
 from pc import Logger
+from collections import namedtuple, deque
+
+def limit_cpu():
+    p = psutil.Process()
+    p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
 
 if __name__ == "__main__":
+    # assign_job(create_job())
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"{device = }")
     # device = 'cpu'
@@ -43,13 +50,22 @@ if __name__ == "__main__":
     dqn = DQN(state_size, n_frames, n_actions, condition_size, batch_size, lr, epsilon,
               gamma, target_replace_iter, memory_capacity, device)
 
+    usage_memory = psutil.Process(os.getpid()).memory_info().rss
+    print(f"usage_memory = {usage_memory / 1024 ** 2} MiB")
+    print(f"{usage_memory = }")
+    print(f"{psutil.Process().nice() = }")
+
     dqn.load(f"{save_dir}/dqn_training")
     # print(f"{len(dqn.memory) = }")
     # dqn.save(f"{save_dir}/dqn_training")
     # print(f"{dqn.eval_net.device = }")
     # print(f"{dqn.target_net.device = }")
 
-    # sys.exit()
+    usage_memory = psutil.Process(os.getpid()).memory_info().rss
+    print(f"\nafter load")
+    print(f"usage_memory = {usage_memory / 1024 ** 2} MiB")
+    print(f"{usage_memory = }")
+    print(f"{psutil.Process().nice() = }")
 
     env = hkenv.HKEnv((h, w), device=device)
     # env.test()
