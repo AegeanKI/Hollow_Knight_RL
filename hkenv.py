@@ -80,6 +80,11 @@ class HKEnv():
         self.win_reward = 1
         self.lose_reward = -1
 
+        obs_location = (1 / 27, 2 / 46)
+        obs_size = (25 / 27, 24 / 28)
+        obs_region = self._location_size_to_region(obs_location, obs_size)
+        self.obs_slice = np.s_[obs_region[1]:obs_region[1] + obs_region[3],
+                               obs_region[0]:obs_region[0] + obs_region[2]]
 
 
     def _location_size_to_region(self, location, size):
@@ -97,7 +102,7 @@ class HKEnv():
         self.prev_character_remain = self.CHARACTER_FULL_HP
         self._counter_reset()
         self.keyboard.execute(Hotkey.NULL)
-        # self.prev_time = time.time()
+        self.prev_time = time.time()
 
     def observe(self):
         # cur_time = time.time()
@@ -107,7 +112,7 @@ class HKEnv():
         enemy_remain = self._get_enemy_hp(frame)
         character_remain = self._get_character_hp(frame)
 
-        obs = cv2.resize(frame, self.obs_size, interpolation=cv2.INTER_AREA)
+        obs = cv2.resize(frame[self.obs_slice], self.obs_size, interpolation=cv2.INTER_AREA)
         obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
         obs = torch.from_numpy(obs).to(self.device)
 
@@ -129,10 +134,11 @@ class HKEnv():
             if stop:
                 self.monitor.activate_move_to_desired()
 
+            time.sleep(0.2)
             self.keyboard.execute(Hotkey.UP)
-            time.sleep(0.1)
+            time.sleep(0.2)
             self.keyboard.execute(Hotkey.NULL)
-            # time.sleep(0.1)
+            time.sleep(0.2)
 
         self.keyboard.execute(Hotkey.JUMP)
         self.keyboard.execute(Hotkey.NULL)
@@ -162,19 +168,45 @@ class HKEnv():
         del win, lose
         return obs, reward, done, enemy_remain
 
-    def reset(self, obs_interval):
+    def reset(self, n_frames, obs_interval):
         self._reset_env()
         self._start()
-        time.sleep(4)
-        obs0, enemy_remain, character_remain = self.observe()
-        time.sleep(0.02 + obs_interval - 0.07)
-        obs1, enemy_remain, character_remain = self.observe()
-        time.sleep(0.02 + obs_interval - 0.07)
-        obs2, enemy_remain, character_remain = self.observe()
-        time.sleep(0.02 + obs_interval - 0.07)
+        time.sleep(3)
 
-        act = Hotkey.NULL.to(self.device)
-        return obs0, obs1, obs2, act, act, act
+        # obs0, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+        # obs1, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+        # obs2, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+
+        # act = Hotkey.NULL.to(self.device)
+        # return obs0, obs1, obs2, act, act, act
+        return self.for_warmup(n_frames, obs_interval)
+
+    def for_warmup(self, n_frames, obs_interval):
+        obs_list, act_list = [], []
+        for i in range(n_frames):
+            obs, enemy_remain, character_remain = self.observe()
+            act = Hotkey.NULL.to(self.device)
+
+            obs_list.append(obs)
+            act_list.append(act)
+            time.sleep(0.02 + obs_interval - 0.07)
+
+            obs_cpu_numpy = obs.cpu().numpy()
+            cv2.imwrite(f"images/obs{i}.png", obs_cpu_numpy)
+
+        # obs0, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+        # obs1, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+        # obs2, enemy_remain, character_remain = self.observe()
+        # time.sleep(0.02 + obs_interval - 0.07)
+
+        # act = Hotkey.NULL.to(self.device)
+        # return obs0, obs1, obs2, act, act, act
+        return torch.stack(obs_list), torch.stack(act_list)
 
     def close(self):
         self._reset_env()
@@ -185,9 +217,9 @@ class HKEnv():
 
         done_reward = 0
         if win:
-            done_reward = done_reward + self.win_reward + math.log(character_remain)
-        if lose:
-            done_reward = done_reward + self.lose_reward
+            done_reward = self.win_reward + math.log(character_remain + 1)
+        elif lose:
+            done_reward = self.lose_reward
 
         # print(f"{self.prev_enemy_remain = }, {enemy_remain = }, {self.enemy_remain_weight_counter.val = }")
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val

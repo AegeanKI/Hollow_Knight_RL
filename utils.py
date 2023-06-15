@@ -25,7 +25,8 @@ class Counter():
         self.val = self.init
 
 class Memory(deque):
-    SAFE_LEN = 10000
+    # SAFE_LEN = 10000
+    SAFE_LEN = 2500
 
     def __init__(self, maxlen):
         self.whole_maxlen = maxlen
@@ -40,7 +41,9 @@ class Memory(deque):
         if self.split and len(self.buffer1) == self.whole_maxlen - Memory.SAFE_LEN:
             self.buffer0.append(self.buffer1[0])
             self.buffer1.append(val)
-        elif self.split:
+        elif self.split and len(self.buffer0) < Memory.SAFE_LEN:
+            self.buffer0.append(val)
+        elif self.split and len(self.buffer1) < self.whole_maxlen - Memory.SAFE_LEN:
             self.buffer1.append(val)
         else:
             self.buffer0.append(val)
@@ -62,10 +65,14 @@ class Memory(deque):
         Logger.indent(indent=4)
         print(f"saving {target_pkl}")
 
-        FileAdmin.safe_save(self.buffer0, tmp_pkl, indent=8)
+        # FileAdmin.safe_remove(tmp_pkl, indent=8)
+        # FileAdmin.safe_remove(target_pkl, indent=8)
+        # FileAdmin.safe_save(self.buffer0, tmp_pkl, indent=8)
+        # FileAdmin.safe_copy(tmp_pkl, target_pkl, indent=8)
+        # FileAdmin.safe_remove(tmp_pkl, indent=8)
+
         FileAdmin.safe_remove(target_pkl, indent=8)
-        FileAdmin.safe_copy(tmp_pkl, target_pkl, indent=8)
-        FileAdmin.safe_remove(tmp_pkl, indent=8)
+        FileAdmin.safe_save(self.buffer0, target_pkl, indent=8)
 
         Logger.indent(indent=4)
         print(f"saving {target_pkl} completed")

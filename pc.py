@@ -97,10 +97,13 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                FileAdmin.safe_remove(name)
+                print("")
+                FileAdmin.safe_remove(name, indent=indent + 4)
+                time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         net = net.to(device)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"saving {name} completed")
 
     @staticmethod
@@ -122,6 +125,7 @@ class FileAdmin:
         net = net.to(device)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"loading {name} completed")
         return net
 
@@ -142,6 +146,7 @@ class FileAdmin:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"removing {name} completed")
 
     @staticmethod
@@ -151,16 +156,19 @@ class FileAdmin:
         done = False
         while not done:
             try:
+                # Logger.indent(indent)
+                # print(f"try to save {name}")
                 time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-                # with open(name, 'wb') as f:
-                #     pickle.dump(target, f)
                 pickle.dump(target, open(name, 'wb'))
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                FileAdmin.safe_remove(name)
+                print("")
+                FileAdmin.safe_remove(name, indent=indent + 4)
+                time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"saving {name} completed")
 
     @staticmethod
@@ -175,9 +183,12 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                FileAdmin.safe_remove(target_name)
+                print("")
+                FileAdmin.safe_remove(target_name, indent=indent + 4)
+                time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"copying {target_name} completed")
 
     @staticmethod
@@ -191,14 +202,13 @@ class FileAdmin:
         while not done:
             try:
                 time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-                # with open(name, 'rb') as f:
-                #     res = pickle.load(f)
                 target = pickle.load(open(name, 'rb'))
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         Logger.clear_line()
         Logger.indent(indent)
+        time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         print(f"loading {name} completed")
         return target
 
