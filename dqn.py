@@ -3,26 +3,29 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
+from collections import deque
 
 from pc import FileAdmin
-from hkenv import Hotkey
-from utils import Memory
+from hkenv import HKEnv
+from utils import Memory, Logger
 from network import resnet18
 
 class DQN(nn.Module):
     def __init__(self, state_size, n_frames, n_actions, condition_size, batch_size, lr, epsilon,
-                 gamma, target_replace_iter, memory_capacity, device):
+                 net_dir, memory_dir, gamma, target_replace_iter, memory_capacity, device):
         super().__init__()
         self.condition_size = condition_size
         self.state_size = state_size
         self.n_condition = torch.prod(torch.Tensor(condition_size).to(torch.int64))
         self.n_states = torch.prod(torch.Tensor(state_size).to(torch.int64))
 
+        self.net_dir = net_dir
         self.eval_net = resnet18(n_frames, n_actions, self.n_condition).to(device)
         self.target_net = resnet18(n_frames, n_actions, self.n_condition).to(device)
 
         self.memory_capacity = memory_capacity
-        self.memory = Memory(memory_capacity)
+        self.memory_dir = memory_dir
+        self.memory = Memory(memory_dir, memory_capacity)
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.loss_func = nn.MSELoss()
         self.learn_step_counter = 0
@@ -64,80 +67,111 @@ class DQN(nn.Module):
             actions_value = self.eval_net(state.unsqueeze(0), condition)
             action = torch.argmax(actions_value)
         action = torch.Tensor(action).to(torch.int64).to(self.device)
-        cond = Hotkey.idx_to_hotkey(action).to(self.device)
+        cond = HKEnv.idx_to_hotkey(action).to(self.device)
         return action, cond
 
+    def store_history(self, history):
+        # flatten_history = deque()
+        flatten_history = []
+        for state, condition, action, reward, next_state in history:
+            trans = torch.hstack((state.flatten(), condition.flatten(), action, reward, next_state.flatten()))
+            flatten_history.append(trans.cpu())
+        self.memory.extend(flatten_history)
 
-    def store_transition(self, state, condition, action, reward, next_state):
-        # print(f"{state.shape = }")
-        # print(f"{condition.shape = }")
-        # print(f"{action = }")
-        # print(f"{reward = }")
-        # print(f"{next_state.shape = }")
-        trans = torch.hstack((state.flatten(), condition.flatten(), action, reward, next_state.flatten()))
-        self.memory.append(trans.cpu())
-        del trans
+        del state, condition, action, reward, next_state, trans
+        del flatten_history
 
-    def random_sample_transition(self):
+
+    # def store_transition(self, state, condition, action, reward, next_state):
+    #     # print(f"{state.shape = }")
+    #     # print(f"{condition.shape = }")
+    #     # print(f"{action = }")
+    #     # print(f"{reward = }")
+    #     # print(f"{next_state.shape = }")
+    #     trans = torch.hstack((state.flatten(), condition.flatten(), action, reward, next_state.flatten()))
+    #     self.memory.append(trans.cpu())
+    #     del trans
+
+    def random_sample_transitions(self, times=1):
         # idx = torch.randint(self.memory_capacity, (1,))[0]
-        idx = torch.randint(len(self.memory), (1,))[0]
-        trans = self.memory[idx]
+        batch_idx = torch.randint(len(self.memory), (times,))
 
-        state = trans[:self.n_states].reshape(self.state_size).to(self.device)
-        condition = trans[self.n_states:self.n_states + self.n_condition].to(torch.int64)
-        condition = condition.reshape(self.condition_size).to(self.device)
-        action = trans[self.n_states + self.n_condition].to(torch.int64).to(self.device)
-        reward = trans[self.n_states + self.n_condition + 1].to(self.device)
-        next_state = trans[-self.n_states:].reshape(self.state_size).to(self.device)
+        transitions = deque()
+        memory_datas = self.memory.batch_getitem(batch_idx)
+        for trans in memory_datas:
+            state = trans[:self.n_states].reshape(self.state_size)
+            condition = trans[self.n_states:self.n_states + self.n_condition].to(torch.int64)
+            condition = condition.reshape(self.condition_size)
+            action = trans[self.n_states + self.n_condition].to(torch.int64)
+            reward = trans[self.n_states + self.n_condition + 1]
+            next_state = trans[-self.n_states:].reshape(self.state_size)
+            transitions.append((state, condition, action, reward, next_state))
 
-        del idx, trans
-        return state, condition, action, reward, next_state
+            del trans
+        # return state, condition, action, reward, next_state
+        return transitions
 
     @property
     def can_learn(self):
-        return len(self.memory) >= self.memory_capacity / 4
-        # return len(self.memory) == self.memory_capacity
+        # return len(self.memory) >= self.memory_capacity / 5
+        return len(self.memory) == self.memory_capacity
 
-    def learn(self):
-        state, condition, action, reward, next_state = self.random_sample_transition()
+    def learn(self, times=1):
+        print(f"sampling", end='\r')
+        cur = time.time()
+        transitions = self.random_sample_transitions(times=times)
+        print(f"sampling completed, time = {time.time() - cur}")
 
-        next_cond = Hotkey.idx_to_hotkey(action).to(self.device)
-        next_condition = torch.cat((condition, next_cond.unsqueeze(0)))[1:]
+        print(f"learning", end='\r')
+        cur = time.time()
+        for idx, (state, condition, action, reward, next_state) in enumerate(transitions):
+            print(f"learning {idx + 1} / {len(transitions)}", end='\r')
+            state = state.to(self.device)
+            condition = condition.to(self.device)
+            action = action.to(self.device)
+            reward = reward.to(self.device)
+            next_state = next_state.to(self.device)
 
-        q_eval = self.eval_net(state.unsqueeze(0), condition)[0, action]
-        q_next = self.target_net(next_state.unsqueeze(0), next_condition).detach()
-        q_target = reward + self.gamma * q_next.max()
-        loss = self.loss_func(q_eval, q_target)
+            next_cond = HKEnv.idx_to_hotkey(action).to(self.device)
+            next_condition = torch.cat((condition, next_cond.unsqueeze(0)))[1:]
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+            q_eval = self.eval_net(state.unsqueeze(0), condition)[0, action]
+            q_next = self.target_net(next_state.unsqueeze(0), next_condition).detach()
+            q_target = reward + self.gamma * q_next.max()
+            loss = self.loss_func(q_eval, q_target)
 
-        self.learn_step_counter += 1
-        if self.learn_step_counter % self.target_replace_iter == 0:
-            print(f"copy target from eval")
-            self.target_net.load_state_dict(self.eval_net.state_dict())
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
 
-        del state, condition, action, reward, next_state, next_condition
-        del q_eval, q_next, q_target, loss
+            self.learn_step_counter += 1
+            if self.learn_step_counter % self.target_replace_iter == 0:
+                print(f"copy target from eval")
+                self.target_net.load_state_dict(self.eval_net.state_dict())
+
+            del state, condition, action, reward, next_state
+            del next_cond, next_condition
+            del q_eval, q_next, q_target, loss
+        Logger.clear_line()
+        print(f"learning completed, time = {time.time() - cur}")
 
     def save(self, name):
         print(f"saving net", end='\r')
-        FileAdmin.safe_save_net(self.eval_net, f"{name}_eval_net.pt")
+        FileAdmin.safe_save_net(self.eval_net, f"{self.net_dir}/{name}.pt")
         print(f"saving net completed")
 
-        print(f"saving memory")
-        self.memory.save(f"{name}_memory")
-        print(f"saving memory completed")
+        print(f"saving {name} memory")
+        self.memory.save(new_prefix=name)
+        print(f"saving {name} memory completed")
 
     def load(self, name):
         print(f"loading net", end='\r')
-        self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{name}_eval_net.pt")
-        self.target_net = FileAdmin.safe_load_net(self.target_net, f"{name}_eval_net.pt")
+        self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{self.net_dir}/{name}.pt")
+        self.target_net = FileAdmin.safe_load_net(self.target_net, f"{self.net_dir}/{name}.pt")
         print(f"loading net completed")
 
-        print(f"loading memory")
-        self.memory.load(f"{name}_memory")
-        print(f"loading memory completed")
+        print(f"loading {name} memory")
+        self.memory.load(new_prefix=name)
+        print(f"loading {name} memory completed")
 
         self.warmup()

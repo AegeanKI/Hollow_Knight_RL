@@ -12,37 +12,38 @@ from utils import Counter, unpackbits
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.
 
-class Hotkey:
-    KEYS = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
-    KEYS_NUM = len(KEYS)
-
-    ALL_POSSIBLE_NUM = 2 ** KEYS_NUM
-    ALL_POSSIBLE = unpackbits(np.arange(2 ** KEYS_NUM), KEYS_NUM)
-
-    NULL = ALL_POSSIBLE[0]
-    UP = ALL_POSSIBLE[1]
-    DOWN = ALL_POSSIBLE[2]
-    LEFT = ALL_POSSIBLE[4]
-    RIGHT = ALL_POSSIBLE[8]
-    JUMP = ALL_POSSIBLE[16]
-    ATTACK = ALL_POSSIBLE[32]
-    DASH = ALL_POSSIBLE[64]
-    SPELL = ALL_POSSIBLE[128]
-    SDASH = ALL_POSSIBLE[256]
-
-    @staticmethod
-    def idx_to_hotkey(idx):
-        return Hotkey.ALL_POSSIBLE[idx]
-
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
     WINDOW_SIZE = (1280, 720)
     WINDOW_LOCATION = (0, 0)
     CHARACTER_FULL_HP = 9
 
+    class Hotkey:
+        KEYS = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
+        KEYS_NUM = len(KEYS)
+
+        ALL_POSSIBLE_NUM = 2 ** KEYS_NUM
+        ALL_POSSIBLE = unpackbits(np.arange(2 ** KEYS_NUM), KEYS_NUM)
+
+        NULL = ALL_POSSIBLE[0]
+        UP = ALL_POSSIBLE[1]
+        DOWN = ALL_POSSIBLE[2]
+        LEFT = ALL_POSSIBLE[4]
+        RIGHT = ALL_POSSIBLE[8]
+        JUMP = ALL_POSSIBLE[16]
+        ATTACK = ALL_POSSIBLE[32]
+        DASH = ALL_POSSIBLE[64]
+        SPELL = ALL_POSSIBLE[128]
+        SDASH = ALL_POSSIBLE[256]
+
+    @staticmethod
+    def idx_to_hotkey(idx):
+        return HKEnv.Hotkey.ALL_POSSIBLE[idx]
+
     def __init__(self, obs_size, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
-        self.keyboard = Keyboard(Hotkey.KEYS)
+        self.keyboard = Keyboard(HKEnv.Hotkey.KEYS)
+        # self.hotkeyset = HKEnv.HotkeySet(self.keyboard)
         self.obs_size = obs_size
         self.device = device
 
@@ -75,10 +76,11 @@ class HKEnv():
 
 
         # for reward
-        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00002, high=0.01, low=0.005)
-        self.character_remain_weight_counter = Counter(init=0.0001, increase=0.000001, high=0.0002, low=0.0001)
+        self.enemy_remain_weight_counter = Counter(init=0.1, increase=-0.002, high=0.1, low=0.05)
+        self.character_remain_weight_counter = Counter(init=0.1, increase=0.001, high=0.2, low=0.1)
         self.win_reward = 1
         self.lose_reward = -1
+        self.conflict_reward = -1
 
         obs_location = (1 / 27, 2 / 46)
         obs_size = (25 / 27, 24 / 28)
@@ -101,8 +103,8 @@ class HKEnv():
         self.prev_enemy_remain = self.enemy_full_hp
         self.prev_character_remain = self.CHARACTER_FULL_HP
         self._counter_reset()
-        self.keyboard.execute(Hotkey.NULL)
-        self.prev_time = time.time()
+        self.keyboard.execute(HKEnv.Hotkey.NULL)
+        # self.prev_time = time.time()
 
     def observe(self):
         # cur_time = time.time()
@@ -135,25 +137,26 @@ class HKEnv():
                 self.monitor.activate_move_to_desired()
 
             time.sleep(0.2)
-            self.keyboard.execute(Hotkey.UP)
+            self.keyboard.execute(HKEnv.Hotkey.UP)
             time.sleep(0.2)
-            self.keyboard.execute(Hotkey.NULL)
+            self.keyboard.execute(HKEnv.Hotkey.NULL)
             time.sleep(0.2)
 
-        self.keyboard.execute(Hotkey.JUMP)
-        self.keyboard.execute(Hotkey.NULL)
+        self.keyboard.execute(HKEnv.Hotkey.JUMP)
+        self.keyboard.execute(HKEnv.Hotkey.NULL)
 
         del find, stop
 
     def step(self, action_idx):
-        self.keyboard.execute(Hotkey.idx_to_hotkey(action_idx))
+        action = HKEnv.idx_to_hotkey(action_idx)
+        self.keyboard.execute(action)
         obs, enemy_remain, character_remain = self.observe()
 
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
         done = (win or lose)
 
-        reward = self._calculate_reward(enemy_remain, character_remain)
+        reward = self._calculate_reward(enemy_remain, character_remain, action)
         self._counter_step()
 
         if enemy_remain < self.prev_enemy_remain:
@@ -172,46 +175,41 @@ class HKEnv():
         self._reset_env()
         self._start()
         time.sleep(3)
-
-        # obs0, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs1, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs2, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-
-        # act = Hotkey.NULL.to(self.device)
-        # return obs0, obs1, obs2, act, act, act
         return self.for_warmup(n_frames, obs_interval)
 
     def for_warmup(self, n_frames, obs_interval):
         obs_list, act_list = [], []
         for i in range(n_frames):
             obs, enemy_remain, character_remain = self.observe()
-            act = Hotkey.NULL.to(self.device)
+            act = HKEnv.Hotkey.NULL.to(self.device)
 
             obs_list.append(obs)
             act_list.append(act)
             time.sleep(0.02 + obs_interval - 0.07)
 
-            obs_cpu_numpy = obs.cpu().numpy()
-            cv2.imwrite(f"images/obs{i}.png", obs_cpu_numpy)
+            # obs_cpu_numpy = obs.cpu().numpy()
+            # cv2.imwrite(f"images/obs{i}.png", obs_cpu_numpy)
 
-        # obs0, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs1, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs2, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-
-        # act = Hotkey.NULL.to(self.device)
-        # return obs0, obs1, obs2, act, act, act
         return torch.stack(obs_list), torch.stack(act_list)
 
     def close(self):
         self._reset_env()
 
-    def _calculate_reward(self, enemy_remain, character_remain):
+    @staticmethod
+    def contain(action, key_vector):
+        return torch.sum(action * key_vector)
+
+    @staticmethod
+    def check_action_conflict(action):
+        if HKEnv.contain(action, HKEnv.Hotkey.LEFT) and HKEnv.contain(action, HKEnv.Hotkey.RIGHT):
+            return True
+        elif HKEnv.contain(action, HKEnv.Hotkey.ATTACK) and HKEnv.contain(action, HKEnv.Hotkey.SDASH):
+            return True
+        elif HKEnv.contain(action, HKEnv.Hotkey.SPELL) and HKEnv.contain(action, HKEnv.Hotkey.SDASH):
+            return True
+        return False
+
+    def _calculate_reward(self, enemy_remain, character_remain, action):
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
 
@@ -221,13 +219,16 @@ class HKEnv():
         elif lose:
             done_reward = self.lose_reward
 
+        action_reward = self.conflict_reward if HKEnv.check_action_conflict(action) else 0
+
         # print(f"{self.prev_enemy_remain = }, {enemy_remain = }, {self.enemy_remain_weight_counter.val = }")
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
-        character_hp_reward = (character_remain + 1 - self.prev_character_remain) * self.character_remain_weight_counter.val
-        reward = done_reward + enemy_hp_reward + character_hp_reward
+        character_hp_reward = (character_remain - self.prev_character_remain) * self.character_remain_weight_counter.val
+        reward = done_reward + enemy_hp_reward + character_hp_reward + action_reward
         del win, lose
+        print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {action_reward = }, {reward = }")
         del enemy_hp_reward, character_hp_reward
-        # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {reward = }")
+        del done_reward, action_reward
         return torch.Tensor([reward]).to(self.device)
 
     def _counter_step(self):
@@ -264,68 +265,21 @@ class HKEnv():
 
 
     def test(self):
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.DASH)
-        self.observe()
-        
-        time.sleep(0.3)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.2)
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.2)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-        
         for _ in range(3):
             # shriek pogo
             time.sleep(0.1)
-            self.keyboard.execute(Hotkey.UP + Hotkey.SPELL)
+            self.keyboard.execute(HKEnv.Hotkey.UP + HKEnv.Hotkey.SPELL)
             self.observe()
            
             time.sleep(0.6)
-            self.keyboard.execute(Hotkey.DOWN + Hotkey.ATTACK + Hotkey.JUMP)
+            self.keyboard.execute(HKEnv.Hotkey.DOWN + HKEnv.Hotkey.ATTACK + HKEnv.Hotkey.JUMP)
             self.observe()
 
             time.sleep(0.11)
-            self.keyboard.execute(Hotkey.JUMP)
+            self.keyboard.execute(HKEnv.Hotkey.JUMP)
             self.observe()
             
             time.sleep(0.2)
-            self.keyboard.execute(Hotkey.NULL)
+            self.keyboard.execute(HKEnv.Hotkey.NULL)
             self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.JUMP)
-        self.observe()
-
-        time.sleep(0.4)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT + Hotkey.DASH)
-        self.observe()
         
-        time.sleep(0.3)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-

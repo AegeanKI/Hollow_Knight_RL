@@ -130,12 +130,13 @@ class FileAdmin:
         return net
 
     @staticmethod
-    def safe_remove(name, indent=0):
+    def safe_remove(name, indent=0, quiet=False):
         if not os.path.exists(name):
             return
 
-        Logger.indent(indent)
-        print(f"removing {name}", end='\r')
+        if not quiet:
+            Logger.indent(indent)
+            print(f"removing {name}", end='\r')
         done = False
         while not done:
             try:
@@ -144,15 +145,18 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"removing {name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"removing {name} completed")
 
     @staticmethod
-    def safe_save(target, name, indent=0):
-        Logger.indent(indent)
-        print(f"saving {name}", end='\r')
+    def safe_save(target, name, indent=0, quiet=False):
+        # print(f"safe_save {name = }")
+        if not quiet:
+            Logger.indent(indent)
+            print(f"saving {name}", end='\r')
         done = False
         while not done:
             try:
@@ -163,13 +167,15 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                print("")
-                FileAdmin.safe_remove(name, indent=indent + 4)
+                if not quiet:
+                    print("")
+                FileAdmin.safe_remove(name, indent=indent + 4, quiet=quiet)
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"saving {name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"saving {name} completed")
 
     @staticmethod
     def safe_copy(tmp_name, target_name, indent=0):
@@ -192,12 +198,14 @@ class FileAdmin:
         print(f"copying {target_name} completed")
 
     @staticmethod
-    def safe_load(target, name, indent=0):
+    def safe_load(target, name, indent=0, quiet=False):
+        # print(f"safe_load {name = }")
         if not os.path.exists(name):
             return target
 
-        Logger.indent(indent)
-        print(f"loading {name}", end='\r')
+        if not quiet:
+            Logger.indent(indent)
+            print(f"loading {name}", end='\r')
         done = False
         while not done:
             try:
@@ -206,9 +214,10 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"loading {name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"loading {name} completed")
         return target
 
