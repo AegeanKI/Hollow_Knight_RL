@@ -5,166 +5,140 @@ import time
 import cv2
 import torch
 import psutil
-import hkenv
 import numpy as np
 
 from chainer import serializers
 from torch.backends import cudnn
 from dqn import DQN
 from pc import Logger
+from hkenv import Keys, Operation, HKEnv
 from collections import namedtuple, deque
 
 def limit_cpu():
     p = psutil.Process()
     p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
 
+def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
+    dqn.warmup()
+    observe_list, action_list, info_list = env.for_warmup(n_frames, observe_interval)
+    state, condition, status = dqn.convert_to_init((observe_list, action_list, info_list))
+    action_idx = dqn.choose_action_idx(state, condition, status, evaluate=True)
+    # warmup completed
+
+    experiences = []
+    t = 0
+    rewards = 0
+    observe_list, action_list, info_list = env.reset(n_frames, observe_interval)
+    state, condition, status = dqn.convert_to_init((observe_list, action_list, info_list))
+    episode_start_time = time.time()
+    while True:
+        action_idx = dqn.choose_action_idx(state, condition, status)
+        action = Operation.get_by_idx(action_idx)
+        observe, info, reward, done, enemy_remain = env.step(action)
+
+        next_state, next_condition, next_status = dqn.convert_to_next((state, condition, status),
+                                                                      (observe, action, info))
+
+        if train:
+            experiences.append(dqn.convert_to_experience(state, condition, status,
+                                                         action_idx, action, reward,
+                                                         next_state, next_condition, next_status))
+
+        rewards += reward.item()
+
+        if done:
+            env.close()
+            Logger.indent(indent=indent)
+            print(f"Episode {i_episode} finished after {t + 1} timesteps", end='')
+            print(f", total rewards {rewards:.4f}, cur_enemy_remain = {enemy_remain}", end='')
+            print(f", ops = {(t + 1) / (time.time() - episode_start_time):.4f}")
+            break
+
+        state, condition, status = next_state, next_condition, next_status
+        t += 1
+        time.sleep(0.02 + observe_interval - 0.07)
+
+        del action_idx, action
+        del observe, info, reward, done, enemy_remain
+        del next_state, next_condition, next_status
+
+    del observe_list, action_list, info_list
+    del state, condition, status
+    del episode_start_time
+    del t, rewards
+
+    return experiences
+
+
 if __name__ == "__main__":
-    # assign_job(create_job())
+    limit_cpu()
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"{device = }")
-    # device = 'cpu'
     cudnn.benchmark = True
 
-    batch_size = 1
-    lr = 0.01
+    n_frames = 12
+    h = 384
+    w = 216
+    info_size = 1 # got hit
+    memory_capacity = 2000
+    target_replace_iter = memory_capacity // 2
+    net_dir = "nets"
+    memory_dir = "memories"
+    lr = 0.1
     epsilon = 0.1
     gamma = 0.9
-    target_replace_iter = 10000
-    # target_replace_iter = 50
-    memory_capacity = 100000
-    # memory_capacity = 20
     n_episodes = 1000
-    h = 210
-    w = 120
-    n_actions = hkenv.Hotkey.ALL_POSSIBLE_NUM
-    n_frames = 12
-    condition_size = (n_frames, hkenv.Hotkey.KEYS_NUM)
-    state_size = (n_frames, w, h)
-    save_dir = "saves"
-
-    obs_interval = 0.09 # min is 0.07
-
     n_episodes_save = 20
-    # n_episodes_save = 1
+    batch_learn = memory_capacity // 10
+    observe_interval = 0.09 # min is 0.07
 
-    dqn = DQN(state_size, n_frames, n_actions, condition_size, batch_size, lr, epsilon,
-              gamma, target_replace_iter, memory_capacity, device)
+    dqn = DQN(state_size=(n_frames, w, h),
+              condition_size=(n_frames, len(Keys)),
+              status_size=(n_frames, info_size),
+              in_channels=n_frames,
+              out_classes=len(Operation.POSSIBLE_ACTION),
+              lr=lr,
+              total_steps=n_episodes*batch_learn,
+              epsilon=epsilon,
+              gamma=gamma,
+              memory_capacity=memory_capacity,
+              target_replace_iter=target_replace_iter,
+              net_dir=net_dir,
+              memory_dir=memory_dir,
+              device=device)
 
-    usage_memory = psutil.Process(os.getpid()).memory_info().rss
-    print(f"usage_memory = {usage_memory / 1024 ** 2} MiB")
-    print(f"{usage_memory = }")
-    print(f"{psutil.Process().nice() = }")
+    env = HKEnv(observe_size=(h, w),
+                info_size=info_size,
+                device=device)
 
-    dqn.load(f"{save_dir}/dqn_training")
-    # print(f"{len(dqn.memory) = }")
-    # dqn.save(f"{save_dir}/dqn_training")
-    # print(f"{dqn.eval_net.device = }")
-    # print(f"{dqn.target_net.device = }")
-
-    usage_memory = psutil.Process(os.getpid()).memory_info().rss
-    print(f"\nafter load")
-    print(f"usage_memory = {usage_memory / 1024 ** 2} MiB")
-    print(f"{usage_memory = }")
-    print(f"{psutil.Process().nice() = }")
-
-    env = hkenv.HKEnv((h, w), device=device)
+    # dqn.save("dqn_training")
+    dqn.load("dqn_training")
     # env.test()
     # sys.exit()
 
     start_learning = False
-
-    min_enemy_remain = 1e9
-    for i_episode in range(n_episodes):
+    for i_train in range(n_episodes):
         torch.cuda.empty_cache()
+        # print(f"{len(dqn.memory) = }")
 
-        print("warm up episode", end='\r')
-        dqn.warmup()
-        state, condition = env.for_warmup(n_frames, obs_interval)
-        action, new_cond = dqn.choose_action(state, condition, evaluate=True)
-        print("warm up episode completed")
+        experiences = interact(env, dqn, observe_interval, i_train, train=True)
+        dqn.store_experiences(experiences)
 
-        if not start_learning:
-            print(f"{len(dqn.memory) = }")
+        if dqn.can_learn:
+            if not start_learning:
+                start_learning = True
+                print(f"start learning")
+            dqn.learn(batch_learn)
 
-        t = 0
-        rewards = 0
-        episode_start_time = time.time()
-        state, condition = env.reset(n_frames, obs_interval)
-        # sys.exit()
-        while True:
-            action, next_cond = dqn.choose_action(state, condition)
-            next_obs, reward, done, info = env.step(action)
-
-            next_state = torch.cat((state, next_obs.unsqueeze(0)))[1:]
-            next_condition = torch.cat((condition, next_cond.unsqueeze(0)))[1:]
-
-            dqn.store_transition(state, condition, action, reward, next_state)
-
-            rewards += reward.item()
-
-            min_enemy_remain = min(min_enemy_remain, info)
+        if (i_train % n_episodes_save) == n_episodes_save - 1:
+            dqn.save(f"dqn_training")
 
             if dqn.can_learn:
-                if not start_learning:
-                    start_learning = True
-                    print(f"start_learning")
-                dqn.learn() # 0.01
-                time.sleep(obs_interval - 0.07)
-            else:
-                time.sleep(0.01 + obs_interval - 0.07)
-
-            state = next_state
-            condition = next_condition
-
-            if done:
-                print(f"Episode {i_episode} finished after {t + 1} timesteps, total rewards {rewards:.4f}, {min_enemy_remain = }, ops = {(t + 1) / (time.time() - episode_start_time):.4f}")
-
-                if (i_episode % n_episodes_save) == n_episodes_save - 1:
-                    dqn.save(f"{save_dir}/dqn_training")
-
-                    if dqn.can_learn:
-                        print("evaluating", end='\r')
-                        for i_eval in range(3):
-                            rewards = 0
-                            episode_start_time = time.time()
-                            state, condition = env.reset(n_frames, obs_interval)
-                            while True:
-                                # env.render()
-                                action, next_cond = dqn.choose_action(state, condition, evaluate=True)
-                                next_obs, reward, done, info = env.step(action)
-
-                                next_state = torch.cat((state, next_obs.unsqueeze(0)))[1:]
-                                next_condition = torch.cat((condition, next_cond.unsqueeze(0)))[1:]
-
-                                rewards += reward.item()
-
-                                time.sleep(0.02 + obs_interval - 0.07)
-
-                                state = next_state
-                                condition = next_condition
-
-                                if done:
-                                    Logger.indent(indent=4)
-                                    print(f"evaluate {i_eval} finished, total rewards {rewards:.4f}, ops = {(t + 1) / (time.time() - episode_start_time):.4f}")
-                                    break
-                break # if done:
-
-
-            del action, next_cond
-            del next_obs, reward, done, info
-            del next_state, next_condition
-
-            t += 1
-            # if t == 100:
-            #     break
-
-        del rewards
-        del state, condition
-        del t
-
-        # break
+                for i_evaluate in range(3):
+                    _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
 
     print(f"training completed")
-    dqn.save(f"{save_dir}/dqn")
+    dqn.save(f"dqn_completed")
 
     env.close()

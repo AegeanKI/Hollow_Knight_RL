@@ -128,56 +128,62 @@ class ResNetEncoder(nn.Module):
         return x
 
 class ResnetDecoder(nn.Module):
-    def __init__(self, in_features, n_classes, n_conditions):
+    def __init__(self, in_features, out_classes, in_condition_size, in_status_size):
         super().__init__()
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
-        self.decoder = nn.Linear(in_features + n_conditions, n_classes)
+        self.decoder = nn.Linear(in_features + in_condition_size + in_status_size, out_classes)
 
-    def forward(self, x, condition):
+    def forward(self, x, condition, status):
         x = self.avg(x)
         x = x.view(x.size(0), -1)
+        condition = condition.view(-1).unsqueeze(0)
+        status = status.view(-1).unsqueeze(0)
 
-        x = torch.cat((x, condition.view(-1).unsqueeze(0)), dim=1)
-
-        x = self.decoder(x)
+        x = self.decoder(torch.cat((x, condition, status), dim=1))
         return x
 
 class ResNet(nn.Module):
-    def __init__(self, in_channels, n_classes, n_conditions, *args, **kwargs):
+    def __init__(self, in_channels, out_classes, in_condition_size, in_status_size, *args, **kwargs):
         super().__init__()
         self.encoder = ResNetEncoder(in_channels, *args, **kwargs)
-        self.decoder = ResnetDecoder(self.encoder.blocks[-1].blocks[-1].expanded_channels, n_classes, n_conditions)
+        self.decoder = ResnetDecoder(self.encoder.blocks[-1].blocks[-1].expanded_channels,
+                                     out_classes, in_condition_size, in_status_size)
 
     @property
     def device(self):
         return next(self.parameters()).device
 
-    def forward(self, x, condition):
+    def forward(self, x, condition, status):
         x = self.encoder(x)
-        x = self.decoder(x, condition)
+        x = self.decoder(x, condition, status)
         return x
 
-def resnet18(in_channels, n_classes, n_conditions):
-    return ResNet(in_channels, n_classes, n_conditions, block=ResNetBasicBlock, deepths=[2, 2, 2, 2])
+def resnet18(in_channels, out_classes, in_condition_size, in_status_size):
+    return ResNet(in_channels, out_classes, in_condition_size, in_status_size,
+                  block=ResNetBasicBlock, deepths=[2, 2, 2, 2])
 
-def resnet34(in_channels, n_classes, n_conditions):
-    return ResNet(in_channels, n_classes, n_conditions, block=ResNetBasicBlock, deepths=[3, 4, 6, 3])
+def resnet34(in_channels, out_classes, in_condition_size):
+    return ResNet(in_channels, out_classes, in_condition_size, in_status_size,
+                  block=ResNetBasicBlock, deepths=[3, 4, 6, 3])
 
-def resnet50(in_channels, n_classes, n_conditions):
-    return ResNet(in_channels, n_classes, n_conditions, block=ResNetBottleNeckBlock, deepths=[3, 4, 6, 3])
+def resnet50(in_channels, out_classes, in_condition_size):
+    return ResNet(in_channels, out_classes, in_condition_size, in_status_size,
+                  block=ResNetBottleNeckBlock, deepths=[3, 4, 6, 3])
 
-def resnet101(in_channels, n_classes, n_conditions):
-    return ResNet(in_channels, n_classes, n_conditions, block=ResNetBottleNeckBlock, deepths=[3, 4, 23, 3])
+def resnet101(in_channels, out_classes, in_condition_size):
+    return ResNet(in_channels, out_classes, in_condition_size, in_status_size,
+                  block=ResNetBottleNeckBlock, deepths=[3, 4, 23, 3])
 
-def resnet152(in_channels, n_classes, n_conditions):
-    return ResNet(in_channels, n_classes, n_conditions, block=ResNetBottleNeckBlock, deepths=[3, 8, 36, 3])
+def resnet152(in_channels, out_classes, in_condition_size):
+    return ResNet(in_channels, out_classes, in_condition_size, in_status_size,
+                  block=ResNetBottleNeckBlock, deepths=[3, 8, 36, 3])
 
 # class ResNet18(nn.Module):
-#     def __init__(self, n_actions, n_conditions):
+#     def __init__(self, n_actions, in_condition_size):
 #         super().__init__()
 #         # self.model = models.resnet18(weights='DEFAULT')
 #         self.model = ResNet(img_channels=n_frames, num_layers=18,
-#                             n_conditions=n_conditions, num_classes=n_actions)
+#                             in_condition_size=n_conditions, num_classes=n_actions)
 
 #     @property
 #     def device(self):

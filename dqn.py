@@ -1,3 +1,4 @@
+import os
 import time
 
 import torch
@@ -5,139 +6,179 @@ import torch.nn as nn
 import numpy as np
 
 from pc import FileAdmin
-from hkenv import Hotkey
+# from hkenv import Operation
 from utils import Memory
 from network import resnet18
 
 class DQN(nn.Module):
-    def __init__(self, state_size, n_frames, n_actions, condition_size, batch_size, lr, epsilon,
-                 gamma, target_replace_iter, memory_capacity, device):
+
+    def __init__(self, state_size, condition_size, status_size, in_channels,
+                 out_classes, lr, total_steps, epsilon, gamma, memory_capacity, 
+                 target_replace_iter, net_dir, memory_dir, device):
         super().__init__()
-        self.condition_size = condition_size
+
         self.state_size = state_size
-        self.n_condition = torch.prod(torch.Tensor(condition_size).to(torch.int64))
-        self.n_states = torch.prod(torch.Tensor(state_size).to(torch.int64))
+        self.condition_size = condition_size
+        self.status_size = status_size
 
-        self.eval_net = resnet18(n_frames, n_actions, self.n_condition).to(device)
-        self.target_net = resnet18(n_frames, n_actions, self.n_condition).to(device)
+        flatten_condition_size = torch.prod(torch.Tensor(condition_size).to(torch.int64))
+        flatten_state_size = torch.prod(torch.Tensor(state_size).to(torch.int64))
+        flatten_status_size = torch.prod(torch.Tensor(status_size).to(torch.int64))
 
-        self.memory_capacity = memory_capacity
+        self.out_classes = out_classes
+        self.eval_net = resnet18(in_channels=in_channels,
+                                 out_classes=out_classes,
+                                 in_condition_size=flatten_condition_size,
+                                 in_status_size=flatten_status_size).to(device)
+        self.target_net = resnet18(in_channels=in_channels,
+                                   out_classes=out_classes,
+                                   in_condition_size=flatten_condition_size,
+                                   in_status_size=flatten_status_size).to(device)
+
         self.memory = Memory(memory_capacity)
+
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(self.optimizer,
+                                                             lr,
+                                                             total_steps=total_steps+10,
+                                                             pct_start=0.05,
+                                                             cycle_momentum=False,
+                                                             anneal_strategy='linear')
+
         self.loss_func = nn.MSELoss()
         self.learn_step_counter = 0
+        self.target_replace_iter = target_replace_iter
+        self.net_dir = net_dir
+        self.memory_dir = memory_dir
 
-        self.n_actions = n_actions
-        self.batch_size = batch_size
+        if not os.path.exists(self.net_dir):
+            os.makedirs(self.net_dir)
+        if not os.path.exists(self.memory_dir):
+            os.makedirs(self.memory_dir)
+
         self.lr = lr
         self.epsilon = epsilon
         self.gamma = gamma
-        self.target_replace_iter = target_replace_iter
         self.device = device
 
-        # self.warmup()
-
     def warmup(self):
-        # print("warm up", end='\r')
         fake_state = torch.rand(self.state_size).to(self.device)
         fake_condition = torch.rand(self.condition_size).to(self.device)
+        fake_status = torch.rand(self.status_size).to(self.device)
 
-        act = self.choose_action(fake_state, fake_condition, True)
+        action_idx = self.choose_action_idx(fake_state, fake_condition, fake_status, True)
 
-        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition)
-        q_next = self.target_net(fake_state.unsqueeze(0), fake_condition).detach()
+        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition, fake_status)
+        q_next = self.target_net(fake_state.unsqueeze(0), fake_condition, fake_status).detach()
         loss = self.loss_func(q_eval, q_eval)
+        self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        self.optimizer.zero_grad()
-
-        # print("warm up completed")
-        del fake_state, fake_condition
+        del fake_state, fake_condition, fake_status
         del q_eval, q_next, loss
 
-    def choose_action(self, state, condition, evaluate=False):
-        # epsilon-greedy
+    def choose_action_idx(self, state, condition, status, evaluate=False):
         if torch.rand(1) < self.epsilon and not evaluate:
-            action = torch.randint(self.n_actions, (1,))[0]
+            actions_value = torch.rand(self.out_classes)
         else:
-            actions_value = self.eval_net(state.unsqueeze(0), condition)
-            action = torch.argmax(actions_value)
-        action = torch.Tensor(action).to(torch.int64).to(self.device)
-        cond = Hotkey.idx_to_hotkey(action).to(self.device)
-        return action, cond
+            actions_value = self.eval_net(state.unsqueeze(0), condition, status)
+        action_idx = torch.argmax(actions_value).to(self.device)
+        return action_idx
 
+    def convert_to_init(self, elements_list):
+        res = []
+        for elements in elements_list:
+            res.append(torch.stack(elements).to(self.device))
 
-    def store_transition(self, state, condition, action, reward, next_state):
-        # print(f"{state.shape = }")
-        # print(f"{condition.shape = }")
-        # print(f"{action = }")
-        # print(f"{reward = }")
-        # print(f"{next_state.shape = }")
-        trans = torch.hstack((state.flatten(), condition.flatten(), action, reward, next_state.flatten()))
-        self.memory.append(trans.cpu())
-        del trans
+        if len(elements_list) == 1:
+            return res[0]
+        return res
 
-    def random_sample_transition(self):
-        # idx = torch.randint(self.memory_capacity, (1,))[0]
+    def convert_to_next(self, cur_elements_list, new_element_list):
+        res = []
+        for cur_elements, new_element in zip(cur_elements_list, new_element_list):
+            cur_elements = cur_elements.to(self.device)
+            new_element = new_element.to(self.device)
+            res.append(torch.cat((cur_elements, new_element.unsqueeze(0)))[1:])
+        return res
+
+    def convert_to_experience(self, *experience):
+        res = []
+        for e in experience:
+            res.append(e.cpu())
+        return res
+
+    def store_experiences(self, experiences):
+        self.memory.extend(experiences)
+
+    def random_sample_experience(self):
         idx = torch.randint(len(self.memory), (1,))[0]
-        trans = self.memory[idx]
+        memory_data = self.memory[idx]
 
-        state = trans[:self.n_states].reshape(self.state_size).to(self.device)
-        condition = trans[self.n_states:self.n_states + self.n_condition].to(torch.int64)
-        condition = condition.reshape(self.condition_size).to(self.device)
-        action = trans[self.n_states + self.n_condition].to(torch.int64).to(self.device)
-        reward = trans[self.n_states + self.n_condition + 1].to(self.device)
-        next_state = trans[-self.n_states:].reshape(self.state_size).to(self.device)
+        state = memory_data[0].to(self.device)
+        condition = memory_data[1].to(torch.int64).to(self.device)
+        status = memory_data[2].to(self.device)
+        action_idx = memory_data[3].to(torch.int64).to(self.device)
+        action = memory_data[4].to(torch.int64).to(self.device)
+        reward = memory_data[5].to(self.device)
+        next_state = memory_data[6].to(self.device)
+        next_condition = memory_data[7].to(torch.int64).to(self.device)
+        next_status = memory_data[8].to(self.device)
 
-        del idx, trans
-        return state, condition, action, reward, next_state
+        del idx, memory_data
+        return (state, condition, status,
+                action_idx, action, reward,
+                next_state, next_condition, next_status)
 
     @property
     def can_learn(self):
-        return len(self.memory) >= self.memory_capacity / 4
-        # return len(self.memory) == self.memory_capacity
+        # return len(self.memory) >= self.memory.maxlen / 4
+        return len(self.memory) == self.memory.maxlen
 
-    def learn(self):
-        state, condition, action, reward, next_state = self.random_sample_transition()
+    def learn(self, batch_learn=1):
+        for i_learn in range(batch_learn):
+            (state, condition, status,
+             action_idx, action, reward,
+             next_state, next_condition, next_status) = self.random_sample_experience()
 
-        next_cond = Hotkey.idx_to_hotkey(action).to(self.device)
-        next_condition = torch.cat((condition, next_cond.unsqueeze(0)))[1:]
+            q_eval = self.eval_net(state.unsqueeze(0), condition, status)[0, action_idx]
+            q_next = self.target_net(next_state.unsqueeze(0), next_condition, next_status).detach()
+            q_target = reward + self.gamma * q_next.max()
+            loss = self.loss_func(q_eval, q_target)
 
-        q_eval = self.eval_net(state.unsqueeze(0), condition)[0, action]
-        q_next = self.target_net(next_state.unsqueeze(0), next_condition).detach()
-        q_target = reward + self.gamma * q_next.max()
-        loss = self.loss_func(q_eval, q_target)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.scheduler.step()
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+            self.learn_step_counter += 1
+            if self.learn_step_counter % self.target_replace_iter == 0:
+                print(f"copy target from eval")
+                self.target_net.load_state_dict(self.eval_net.state_dict())
 
-        self.learn_step_counter += 1
-        if self.learn_step_counter % self.target_replace_iter == 0:
-            print(f"copy target from eval")
-            self.target_net.load_state_dict(self.eval_net.state_dict())
-
-        del state, condition, action, reward, next_state, next_condition
-        del q_eval, q_next, q_target, loss
+            del state, condition, status
+            del action_idx, action, reward
+            del next_state, next_condition, next_status
+            del q_eval, q_next, q_target, loss
 
     def save(self, name):
         print(f"saving net", end='\r')
-        FileAdmin.safe_save_net(self.eval_net, f"{name}_eval_net.pt")
+        FileAdmin.safe_save_net(self.eval_net, f"{self.net_dir}/{name}", quiet=True)
         print(f"saving net completed")
 
-        print(f"saving memory")
-        self.memory.save(f"{name}_memory")
+        print(f"saving memory", end='\r')
+        self.memory.save(f"{self.memory_dir}/{name}")
         print(f"saving memory completed")
 
     def load(self, name):
         print(f"loading net", end='\r')
-        self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{name}_eval_net.pt")
-        self.target_net = FileAdmin.safe_load_net(self.target_net, f"{name}_eval_net.pt")
+        self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{self.net_dir}/{name}", quiet=True)
+        self.target_net = FileAdmin.safe_load_net(self.target_net, f"{self.net_dir}/{name}", quiet=True)
         print(f"loading net completed")
 
-        print(f"loading memory")
-        self.memory.load(f"{name}_memory")
+        print(f"loading memory", end='\r')
+        self.memory.load(f"{self.memory_dir}/{name}")
         print(f"loading memory completed")
 
         self.warmup()

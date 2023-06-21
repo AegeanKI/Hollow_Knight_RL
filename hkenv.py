@@ -1,5 +1,6 @@
 import time
 import math
+import enum
 
 import cv2
 import torch
@@ -12,82 +13,84 @@ from utils import Counter, unpackbits
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.
 
-class Hotkey:
-    KEYS = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
-    KEYS_NUM = len(KEYS)
+class Keys(enum.IntEnum):
+    UP = 0
+    DOWN = 1
+    LEFT = 2
+    RIGHT = 3
+    JUMP = 4
+    ATTACK = 5
+    DASH = 6
+    SPELL = 7
+    SDASH = 8
 
-    ALL_POSSIBLE_NUM = 2 ** KEYS_NUM
-    ALL_POSSIBLE = unpackbits(np.arange(2 ** KEYS_NUM), KEYS_NUM)
+class Operation:
+    KEYS_MAP = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
 
-    NULL = ALL_POSSIBLE[0]
-    UP = ALL_POSSIBLE[1]
-    DOWN = ALL_POSSIBLE[2]
-    LEFT = ALL_POSSIBLE[4]
-    RIGHT = ALL_POSSIBLE[8]
-    JUMP = ALL_POSSIBLE[16]
-    ATTACK = ALL_POSSIBLE[32]
-    DASH = ALL_POSSIBLE[64]
-    SPELL = ALL_POSSIBLE[128]
-    SDASH = ALL_POSSIBLE[256]
+    POSSIBLE_ACTION = unpackbits(np.arange(2 ** len(Keys)), len(Keys))
+    NULL = POSSIBLE_ACTION[0]
+    UP = POSSIBLE_ACTION[2 ** Keys.UP]
+    DOWN = POSSIBLE_ACTION[2 ** Keys.DOWN]
+    LEFT = POSSIBLE_ACTION[2 ** Keys.LEFT]
+    RIGHT = POSSIBLE_ACTION[2 ** Keys.RIGHT]
+    JUMP = POSSIBLE_ACTION[2 ** Keys.JUMP]
+    ATTACK = POSSIBLE_ACTION[2 ** Keys.ATTACK]
+    DASH = POSSIBLE_ACTION[2 ** Keys.DASH]
+    SPELL = POSSIBLE_ACTION[2 ** Keys.SPELL]
+    SDASH = POSSIBLE_ACTION[2 ** Keys.SDASH]
 
     @staticmethod
-    def idx_to_hotkey(idx):
-        return Hotkey.ALL_POSSIBLE[idx]
+    def get_by_idx(idx):
+        return Operation.POSSIBLE_ACTION[idx]
+
+    @staticmethod
+    def check_contain(action, key):
+        return action[key]
+
+    @staticmethod
+    def has_conflict(action):
+        has_left = Operation.check_contain(action, Keys.LEFT)
+        has_right = Operation.check_contain(action, Keys.RIGHT)
+        has_attack = Operation.check_contain(action, Keys.ATTACK)
+        has_spell = Operation.check_contain(action, Keys.SPELL)
+        has_sdash = Operation.check_contain(action, Keys.SDASH)
+        if has_left and has_right:
+            return True
+        if has_sdash and has_attack:
+            return True
+        if has_sdash and has_spell:
+            return True
+        return False
 
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
     WINDOW_SIZE = (1280, 720)
     WINDOW_LOCATION = (0, 0)
-    CHARACTER_FULL_HP = 9
 
-    def __init__(self, obs_size, device):
+    CHARACTER_FULL_HP = 9
+    ENEMY_FULL_HP = 955 - 324
+    ENEMY_HP_SLICE = np.s_[688, 324:955]
+    CHARACTER_HP_SLICE = np.s_[92, 216:536:36, 0]
+    MENU_REGION = (711, 320, 106, 51)
+    MENU_SLICE = np.s_[320:371, 711:817]
+    OBSERVE_SLICE = np.s_[31:468, 47:1232]
+
+    WIN_REWARD = 1
+    LOSE_REWARD = -1
+    KEY_CONFLICT_REWARD = -1
+
+    def __init__(self, observe_size, info_size, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
-        self.keyboard = Keyboard(Hotkey.KEYS)
-        self.obs_size = obs_size
+        self.keyboard = Keyboard(Operation.KEYS_MAP)
+        self.observe_size = observe_size
+        self.info_size = info_size
         self.device = device
 
-        self._initialize()
+        self.enemy_remain_weight_counter = Counter(init=0.1, increase=-0.002, high=0.1, low=0.05)
+        self.character_remain_weight_counter = Counter(init=0.1, increase=0.001, high=0.2, low=0.1)
         self._reset_env()
 
-    def _initialize(self):
-        # for observe
-        enempy_hp_location = (1 / 4 + 1 / 300, 49 / 52)
-        enemy_hp_size = (1 / 2 - 2 / 300, 1 / 35)
-        enemy_hp_region = self._location_size_to_region(enempy_hp_location, enemy_hp_size)
-        enemy_hp_target_row = enemy_hp_region[1] + int(self.WINDOW_SIZE[1] * enemy_hp_size[1] / 2)
-        self.enemy_hp_slice = np.s_[enemy_hp_target_row,
-                                    enemy_hp_region[0]:enemy_hp_region[0] + enemy_hp_region[2]]
-        self.enemy_full_hp = enemy_hp_region[2]
-
-        character_hp_location = (1 / 6 - 1 / 200 + 1 / 140, 1 / 8)
-        character_hp_size = (1 / 4, 1 / 128)
-        character_hp_region = self._location_size_to_region(character_hp_location, character_hp_size)
-        character_hp_target_row = character_hp_region[1] + int(self.WINDOW_SIZE[1] * character_hp_size[1] / 2)
-        mask_width = int(1 / 20 * self.WINDOW_SIZE[1])
-        self.character_hp_slice = np.s_[character_hp_target_row,
-                                        character_hp_region[0]:character_hp_region[0] + character_hp_region[2]:mask_width, 0]
-
-        menu_location = (5 / 9, 4 / 9)
-        menu_size = (1 / 12, 1 / 14)
-        self.menu_region = self._location_size_to_region(menu_location, menu_size)
-        self.menu_slice = np.s_[self.menu_region[1]:self.menu_region[1] + self.menu_region[3],
-                                self.menu_region[0]:self.menu_region[0] + self.menu_region[2]]
-
-
-        # for reward
-        self.enemy_remain_weight_counter = Counter(init=0.01, increase=-0.00002, high=0.01, low=0.005)
-        self.character_remain_weight_counter = Counter(init=0.0001, increase=0.000001, high=0.0002, low=0.0001)
-        self.win_reward = 1
-        self.lose_reward = -1
-
-        obs_location = (1 / 27, 2 / 46)
-        obs_size = (25 / 27, 24 / 28)
-        obs_region = self._location_size_to_region(obs_location, obs_size)
-        self.obs_slice = np.s_[obs_region[1]:obs_region[1] + obs_region[3],
-                               obs_region[0]:obs_region[0] + obs_region[2]]
-
-
-    def _location_size_to_region(self, location, size):
+    def _location_size_to_region(self, location, size): # may comment after change to CONSTANT
         region = (
             int(self.WINDOW_LOCATION[0] + location[0] * self.WINDOW_SIZE[0]),
             int(self.WINDOW_LOCATION[1] + location[1] * self.WINDOW_SIZE[1]),
@@ -98,11 +101,11 @@ class HKEnv():
 
     def _reset_env(self):
         self.is_enemy_full_hp = True
-        self.prev_enemy_remain = self.enemy_full_hp
+        self.prev_enemy_remain = self.ENEMY_FULL_HP
         self.prev_character_remain = self.CHARACTER_FULL_HP
-        self._counter_reset()
-        self.keyboard.execute(Hotkey.NULL)
         self.prev_time = time.time()
+        self._counter_reset()
+        self.keyboard.execute(Operation.NULL)
 
     def observe(self):
         # cur_time = time.time()
@@ -112,123 +115,105 @@ class HKEnv():
         enemy_remain = self._get_enemy_hp(frame)
         character_remain = self._get_character_hp(frame)
 
-        obs = cv2.resize(frame[self.obs_slice], self.obs_size, interpolation=cv2.INTER_AREA)
-        obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-        obs = torch.from_numpy(obs).to(self.device)
+        observe = cv2.resize(frame[self.OBSERVE_SLICE], self.observe_size, interpolation=cv2.INTER_AREA)
+        observe = cv2.cvtColor(observe, cv2.COLOR_RGB2GRAY)
+        observe = torch.from_numpy(observe).to(self.device)
 
         del frame
         # self.prev_time = cur_time
-        return obs, enemy_remain, character_remain
+        return observe, enemy_remain, character_remain
 
     def _start(self):
-        while True:
-            find = self.monitor.find(self.menu_region, "locator\menu_badge.png")
-            if find:
-                break
-
+        while not self.monitor.find(self.MENU_REGION, "locator\menu_badge.png"):
             stop = False
             while not self.monitor.is_active():
-                stop = True
+                if not stop:
+                    print(f"stop")
+                    stop = True
                 time.sleep(10)
-
             if stop:
                 self.monitor.activate_move_to_desired()
 
+            self.keyboard.execute(Operation.UP)
             time.sleep(0.2)
-            self.keyboard.execute(Hotkey.UP)
-            time.sleep(0.2)
-            self.keyboard.execute(Hotkey.NULL)
+            self.keyboard.execute(Operation.NULL)
             time.sleep(0.2)
 
-        self.keyboard.execute(Hotkey.JUMP)
-        self.keyboard.execute(Hotkey.NULL)
+        self.keyboard.execute(Operation.JUMP)
+        self.keyboard.execute(Operation.NULL)
 
-        del find, stop
+        del stop
 
-    def step(self, action_idx):
-        self.keyboard.execute(Hotkey.idx_to_hotkey(action_idx))
-        obs, enemy_remain, character_remain = self.observe()
+    def step(self, action):
+        self.keyboard.execute(action)
+        observe, enemy_remain, character_remain = self.observe()
 
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
         done = (win or lose)
 
-        reward = self._calculate_reward(enemy_remain, character_remain)
+        reward = self._calculate_reward(enemy_remain, character_remain, action)
         self._counter_step()
 
+        info = torch.zeros(self.info_size)
         if enemy_remain < self.prev_enemy_remain:
             self.enemy_remain_weight_counter.reset()
         if character_remain < self.prev_character_remain:
             self.character_remain_weight_counter.reset()
+            info[0] = 1 # get hit info
 
         self.prev_character_remain = character_remain
         self.prev_enemy_remain = enemy_remain
 
         del character_remain
         del win, lose
-        return obs, reward, done, enemy_remain
+        return observe, info, reward, done, enemy_remain
 
-    def reset(self, n_frames, obs_interval):
+    def reset(self, n_frames, observe_interval):
         self._reset_env()
         self._start()
         time.sleep(3)
+        return self.for_warmup(n_frames, observe_interval)
 
-        # obs0, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs1, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs2, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-
-        # act = Hotkey.NULL.to(self.device)
-        # return obs0, obs1, obs2, act, act, act
-        return self.for_warmup(n_frames, obs_interval)
-
-    def for_warmup(self, n_frames, obs_interval):
-        obs_list, act_list = [], []
+    def for_warmup(self, n_frames, observe_interval):
+        observe_list, action_list, info_list = [], [], []
         for i in range(n_frames):
-            obs, enemy_remain, character_remain = self.observe()
-            act = Hotkey.NULL.to(self.device)
+            observe, enemy_remain, character_remain = self.observe()
+            action = Operation.NULL.to(self.device)
+            info = torch.zeros(self.info_size)
 
-            obs_list.append(obs)
-            act_list.append(act)
-            time.sleep(0.02 + obs_interval - 0.07)
+            observe_list.append(observe.to(self.device))
+            action_list.append(action.to(self.device))
+            info_list.append(info.to(self.device))
+            time.sleep(0.02 + observe_interval - 0.07)
 
-            obs_cpu_numpy = obs.cpu().numpy()
-            cv2.imwrite(f"images/obs{i}.png", obs_cpu_numpy)
+            # observe_cpu_numpy = obs.cpu().numpy()
+            # cv2.imwrite(f"images/obs{i}.png", observe_cpu_numpy)
 
-        # obs0, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs1, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-        # obs2, enemy_remain, character_remain = self.observe()
-        # time.sleep(0.02 + obs_interval - 0.07)
-
-        # act = Hotkey.NULL.to(self.device)
-        # return obs0, obs1, obs2, act, act, act
-        return torch.stack(obs_list), torch.stack(act_list)
+        return observe_list, action_list, info_list
 
     def close(self):
         self._reset_env()
 
-    def _calculate_reward(self, enemy_remain, character_remain):
+    def _calculate_reward(self, enemy_remain, character_remain, action):
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
 
         done_reward = 0
         if win:
-            done_reward = self.win_reward + math.log(character_remain + 1)
+            done_reward = self.WIN_REWARD + math.log(character_remain + 1)
         elif lose:
-            done_reward = self.lose_reward
+            done_reward = self.LOSE_REWARD
 
-        # print(f"{self.prev_enemy_remain = }, {enemy_remain = }, {self.enemy_remain_weight_counter.val = }")
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
-        character_hp_reward = (character_remain + 1 - self.prev_character_remain) * self.character_remain_weight_counter.val
-        reward = done_reward + enemy_hp_reward + character_hp_reward
+        character_hp_reward = (character_remain - self.prev_character_remain) * self.character_remain_weight_counter.val
+        key_reward = 0 if not Operation.has_conflict(action) else self.KEY_CONFLICT_REWARD
+
+        reward = done_reward + enemy_hp_reward + character_hp_reward + key_reward
+        # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {key_reward = }, {reward = }")
         del win, lose
-        del enemy_hp_reward, character_hp_reward
-        # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {reward = }")
-        return torch.Tensor([reward]).to(self.device)
+        del done_reward, enemy_hp_reward, character_hp_reward, key_reward
+        return torch.tensor(reward, dtype=torch.float32).to(self.device)
 
     def _counter_step(self):
         self.enemy_remain_weight_counter.step()
@@ -239,7 +224,7 @@ class HKEnv():
         self.character_remain_weight_counter.reset()
 
     def _get_enemy_hp(self, frame):
-        bar = frame[self.enemy_hp_slice]
+        bar = frame[self.ENEMY_HP_SLICE]
         channel_diff = bar[:, 0] - bar[:, 1] - bar[:, 2]
 
         enemy_full = channel_diff.shape[0]
@@ -255,77 +240,28 @@ class HKEnv():
         del enemy_full
         return enemy_remain
 
-
     def _get_character_hp(self, frame):
-        bar = frame[self.character_hp_slice]
+        bar = frame[self.CHARACTER_HP_SLICE]
         remain = np.sum(bar > 150)
         del bar
         return remain
 
-
     def test(self):
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.DASH)
-        self.observe()
-        
-        time.sleep(0.3)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT)
-        self.observe()
-        
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.2)
-        self.keyboard.execute(Hotkey.LEFT + Hotkey.JUMP)
-        self.observe()
-        
-        time.sleep(0.2)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-        
         for _ in range(3):
             # shriek pogo
             time.sleep(0.1)
-            self.keyboard.execute(Hotkey.UP + Hotkey.SPELL)
+            self.keyboard.execute(Operation.UP + Operation.SPELL)
             self.observe()
            
             time.sleep(0.6)
-            self.keyboard.execute(Hotkey.DOWN + Hotkey.ATTACK + Hotkey.JUMP)
+            self.keyboard.execute(Operation.DOWN + Operation.ATTACK + Operation.JUMP)
             self.observe()
 
             time.sleep(0.11)
-            self.keyboard.execute(Hotkey.JUMP)
+            self.keyboard.execute(Operation.JUMP)
             self.observe()
             
             time.sleep(0.2)
-            self.keyboard.execute(Hotkey.NULL)
+            self.keyboard.execute(Operation.NULL)
             self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.JUMP)
-        self.observe()
-
-        time.sleep(0.4)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
-
-        time.sleep(0.1)
-        self.keyboard.execute(Hotkey.RIGHT + Hotkey.DASH)
-        self.observe()
-        
-        time.sleep(0.3)
-        self.keyboard.execute(Hotkey.NULL)
-        self.observe()
 
