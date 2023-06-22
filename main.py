@@ -7,6 +7,7 @@ import torch
 import psutil
 import numpy as np
 
+from argparse import ArgumentParser
 from chainer import serializers
 from torch.backends import cudnn
 from dqn import DQN
@@ -69,9 +70,19 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
 
     return experiences
 
+def read_args():
+    parser = ArgumentParser()
+
+    parser.add_argument('--evaluate', action='store_true')
+    # parser.add_argument('--load')
+    args = parser.parse_args()
+    return args
+
 
 if __name__ == "__main__":
     limit_cpu()
+
+    args = read_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"{device = }")
@@ -90,7 +101,7 @@ if __name__ == "__main__":
     gamma = 0.9
     n_episodes = 1000
     n_episodes_save = 20
-    batch_learn = memory_capacity // 10
+    batch_learn = memory_capacity // 4
     observe_interval = 0.09 # min is 0.07
 
     dqn = DQN(state_size=(n_frames, w, h),
@@ -117,28 +128,32 @@ if __name__ == "__main__":
     # env.test()
     # sys.exit()
 
-    start_learning = False
-    for i_train in range(n_episodes):
-        torch.cuda.empty_cache()
-        # print(f"{len(dqn.memory) = }")
+    if args.evaluate:
+        for i_evaluate in range(3):
+            _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
+    else:
+        start_learning = False
+        for i_train in range(n_episodes):
+            torch.cuda.empty_cache()
+            # print(f"{len(dqn.memory) = }")
 
-        experiences = interact(env, dqn, observe_interval, i_train, train=True)
-        dqn.store_experiences(experiences)
-
-        if dqn.can_learn:
-            if not start_learning:
-                start_learning = True
-                print(f"start learning")
-            dqn.learn(batch_learn)
-
-        if (i_train % n_episodes_save) == n_episodes_save - 1:
-            dqn.save(f"dqn_training")
+            experiences = interact(env, dqn, observe_interval, i_train, train=True)
+            dqn.store_experiences(experiences)
 
             if dqn.can_learn:
-                for i_evaluate in range(3):
-                    _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
+                if not start_learning:
+                    start_learning = True
+                    print(f"start learning")
+                dqn.learn(batch_learn)
 
-    print(f"training completed")
-    dqn.save(f"dqn_completed")
+            if (i_train % n_episodes_save) == n_episodes_save - 1:
+                dqn.save(f"dqn_training")
+
+                if dqn.can_learn:
+                    for i_evaluate in range(3):
+                        _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
+
+        print(f"training completed")
+        dqn.save(f"dqn_completed")
 
     env.close()

@@ -48,19 +48,27 @@ class Operation:
         return action[key]
 
     @staticmethod
-    def has_conflict(action):
+    def count_conflict(action):
         has_left = Operation.check_contain(action, Keys.LEFT)
         has_right = Operation.check_contain(action, Keys.RIGHT)
+        has_jump = Operation.check_contain(action, Keys.JUMP)
         has_attack = Operation.check_contain(action, Keys.ATTACK)
+        has_dash = Operation.check_contain(action, Keys.DASH)
         has_spell = Operation.check_contain(action, Keys.SPELL)
         has_sdash = Operation.check_contain(action, Keys.SDASH)
+
+        res = 0
         if has_left and has_right:
-            return True
+            res = res + 1
+        if has_sdash and has_jump:
+            res = res + 1
         if has_sdash and has_attack:
-            return True
+            res = res + 1
+        if has_sdash and has_dash:
+            res = res + 1
         if has_sdash and has_spell:
-            return True
-        return False
+            res = res + 1
+        return res
 
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
@@ -75,9 +83,11 @@ class HKEnv():
     MENU_SLICE = np.s_[320:371, 711:817]
     OBSERVE_SLICE = np.s_[31:468, 47:1232]
 
-    WIN_REWARD = 1
-    LOSE_REWARD = -1
-    KEY_CONFLICT_REWARD = -1
+    WIN_REWARD = 10
+    LOSE_REWARD = -10
+    KEY_CONFLICT_REWARD = -10
+    KEY_HOLD_REWARD = -10
+    NOTHING_HAPPEN_REWARD = -0.1
 
     def __init__(self, observe_size, info_size, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
@@ -86,8 +96,8 @@ class HKEnv():
         self.info_size = info_size
         self.device = device
 
-        self.enemy_remain_weight_counter = Counter(init=0.1, increase=-0.002, high=0.1, low=0.05)
-        self.character_remain_weight_counter = Counter(init=0.1, increase=0.001, high=0.2, low=0.1)
+        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.02, high=1, low=0.5)
+        self.character_remain_weight_counter = Counter(init=1, increase=0.01, high=2, low=1)
         self._reset_env()
 
     def _location_size_to_region(self, location, size): # may comment after change to CONSTANT
@@ -104,6 +114,7 @@ class HKEnv():
         self.prev_enemy_remain = self.ENEMY_FULL_HP
         self.prev_character_remain = self.CHARACTER_FULL_HP
         self.prev_time = time.time()
+        self.key_hold = torch.zeros(len(Keys))
         self._counter_reset()
         self.keyboard.execute(Operation.NULL)
 
@@ -195,6 +206,21 @@ class HKEnv():
     def close(self):
         self._reset_env()
 
+    def _check_key_hold_too_long(self, action):
+        for i in range(len(Keys)):
+            if action[i]:
+                self.key_hold[i] = self.key_hold[i] + 1
+            else:
+                self.key_hold[i] = 0
+
+        if self.key_hold[Keys.JUMP] > 5:
+            return True
+        if self.key_hold[Keys.DASH] > 3:
+            return True
+        if self.key_hold[Keys.SPELL] > 3:
+            return True
+        return False
+
     def _calculate_reward(self, enemy_remain, character_remain, action):
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
@@ -207,9 +233,16 @@ class HKEnv():
 
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (character_remain - self.prev_character_remain) * self.character_remain_weight_counter.val
-        key_reward = 0 if not Operation.has_conflict(action) else self.KEY_CONFLICT_REWARD
+        # key_conflict_reward = 0 if not Operation.count_conflict(action) else self.KEY_CONFLICT_REWARD
+        key_conflict_reward = Operation.count_conflict(action) * self.KEY_CONFLICT_REWARD
+        key_hold_reward = 0 if not self._check_key_hold_too_long(action) else self.KEY_HOLD_REWARD
 
-        reward = done_reward + enemy_hp_reward + character_hp_reward + key_reward
+        nothing_happen_reward = 0
+        if self.prev_character_remain == character_remain and self.prev_enemy_remain == enemy_remain:
+            nothing_happen_reward = self.NOTHING_HAPPEN_REWARD
+
+        reward = done_reward + enemy_hp_reward + character_hp_reward
+        reward = reward + key_conflict_reward + key_hold_reward + nothing_happen_reward
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {key_reward = }, {reward = }")
         del win, lose
         del done_reward, enemy_hp_reward, character_hp_reward, key_reward

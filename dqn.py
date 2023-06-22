@@ -38,12 +38,13 @@ class DQN(nn.Module):
         self.memory = Memory(memory_capacity)
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(self.optimizer,
-                                                             lr,
-                                                             total_steps=total_steps+10,
-                                                             pct_start=0.05,
-                                                             cycle_momentum=False,
-                                                             anneal_strategy='linear')
+        self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
+                                                           base_lr=lr/ 10,
+                                                           max_lr=lr,
+                                                           mode='triangular2',
+                                                           step_size_up=total_steps/(2*10),
+                                                           step_size_down=total_steps/(2*10),
+                                                           cycle_momentum=False)
 
         self.loss_func = nn.MSELoss()
         self.learn_step_counter = 0
