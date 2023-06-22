@@ -35,6 +35,7 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
     while True:
         action_idx = dqn.choose_action_idx(state, condition, status)
         action = Operation.get_by_idx(action_idx)
+        action_idx, action = Operation.replace_conflict(action_idx, action)
         observe, info, reward, done, enemy_remain = env.step(action)
 
         next_state, next_condition, next_status = dqn.convert_to_next((state, condition, status),
@@ -124,7 +125,7 @@ if __name__ == "__main__":
                 device=device)
 
     # dqn.save("dqn_training")
-    dqn.load("dqn_training")
+    # dqn.load("dqn_training")
     # env.test()
     # sys.exit()
 

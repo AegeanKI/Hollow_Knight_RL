@@ -28,6 +28,7 @@ class Operation:
     KEYS_MAP = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
 
     POSSIBLE_ACTION = unpackbits(np.arange(2 ** len(Keys)), len(Keys))
+
     NULL = POSSIBLE_ACTION[0]
     UP = POSSIBLE_ACTION[2 ** Keys.UP]
     DOWN = POSSIBLE_ACTION[2 ** Keys.DOWN]
@@ -40,12 +41,16 @@ class Operation:
     SDASH = POSSIBLE_ACTION[2 ** Keys.SDASH]
 
     @staticmethod
+    def key_idx(key):
+        return 2 ** key
+
+    @staticmethod
     def get_by_idx(idx):
         return Operation.POSSIBLE_ACTION[idx]
 
     @staticmethod
     def check_contain(action, key):
-        return action[key]
+        return action[key].item()
 
     @staticmethod
     def count_conflict(action):
@@ -60,15 +65,35 @@ class Operation:
         res = 0
         if has_left and has_right:
             res = res + 1
-        if has_sdash and has_jump:
-            res = res + 1
-        if has_sdash and has_attack:
-            res = res + 1
-        if has_sdash and has_dash:
-            res = res + 1
-        if has_sdash and has_spell:
-            res = res + 1
+        if has_sdash:
+            res = res + has_jump + has_attack + has_dash + has_spell
         return res
+
+    @staticmethod
+    def replace_conflict(action_idx, action):
+        if torch.rand(1) < 0.1:
+            return action_idx, action
+
+        has_left = Operation.check_contain(action, Keys.LEFT)
+        has_right = Operation.check_contain(action, Keys.RIGHT)
+        has_jump = Operation.check_contain(action, Keys.JUMP)
+        has_attack = Operation.check_contain(action, Keys.ATTACK)
+        has_dash = Operation.check_contain(action, Keys.DASH)
+        has_spell = Operation.check_contain(action, Keys.SPELL)
+        has_sdash = Operation.check_contain(action, Keys.SDASH)
+
+        if has_left and has_right:
+            change_key = Keys.LEFT if torch.rand(1) < 0.5 else Keys.RIGHT
+            action[change_key] = 0
+            action_idx = action_idx - Operation.key_idx(change_key)
+
+        if has_sdash:
+            if has_jump or has_attack or has_dash or has_spell:
+                action[Keys.SDASH] = 0
+                action_idx = action_idx - Operation.key_idx(Keys.SDASH)
+        return action_idx, action
+
+
 
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
@@ -99,6 +124,8 @@ class HKEnv():
         self.enemy_remain_weight_counter = Counter(init=1, increase=-0.02, high=1, low=0.5)
         self.character_remain_weight_counter = Counter(init=1, increase=0.01, high=2, low=1)
         self._reset_env()
+        self.observe_base = cv2.imread("locator/base_field.png", cv2.IMREAD_GRAYSCALE)
+        self.observe_base = torch.from_numpy(self.observe_base).to(self.device)
 
     def _location_size_to_region(self, location, size): # may comment after change to CONSTANT
         region = (
@@ -129,6 +156,7 @@ class HKEnv():
         observe = cv2.resize(frame[self.OBSERVE_SLICE], self.observe_size, interpolation=cv2.INTER_AREA)
         observe = cv2.cvtColor(observe, cv2.COLOR_RGB2GRAY)
         observe = torch.from_numpy(observe).to(self.device)
+        observe = observe - self.observe_base
 
         del frame
         # self.prev_time = cur_time
