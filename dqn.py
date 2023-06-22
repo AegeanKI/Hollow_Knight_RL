@@ -41,7 +41,7 @@ class DQN(nn.Module):
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
                                                            base_lr=lr/ 10,
                                                            max_lr=lr,
-                                                           mode='triangular2',
+                                                           gamma=0.8,
                                                            step_size_up=total_steps/(2*10),
                                                            step_size_down=total_steps/(2*10),
                                                            cycle_momentum=False)

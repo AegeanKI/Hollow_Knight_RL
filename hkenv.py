@@ -245,7 +245,8 @@ class HKEnv():
         reward = reward + key_conflict_reward + key_hold_reward + nothing_happen_reward
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {key_reward = }, {reward = }")
         del win, lose
-        del done_reward, enemy_hp_reward, character_hp_reward, key_reward
+        del done_reward, enemy_hp_reward, character_hp_reward
+        del key_conflict_reward, key_hold_reward, nothing_happen_reward
         return torch.tensor(reward, dtype=torch.float32).to(self.device)
 
     def _counter_step(self):
