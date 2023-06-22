@@ -81,7 +81,7 @@ class HKEnv():
     CHARACTER_HP_SLICE = np.s_[92, 216:536:36, 0]
     MENU_REGION = (711, 320, 106, 51)
     MENU_SLICE = np.s_[320:371, 711:817]
-    OBSERVE_SLICE = np.s_[31:468, 47:1232]
+    OBSERVE_SLICE = np.s_[31:648, 47:1232]
 
     WIN_REWARD = 10
     LOSE_REWARD = -10

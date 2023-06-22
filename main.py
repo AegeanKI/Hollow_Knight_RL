@@ -97,9 +97,9 @@ if __name__ == "__main__":
     net_dir = "nets"
     memory_dir = "memories"
     lr = 0.1
-    epsilon = 0.1
+    epsilon = 0.15
     gamma = 0.9
-    n_episodes = 1000
+    n_episodes = 3000
     n_episodes_save = 20
     batch_learn = memory_capacity // 4
     observe_interval = 0.09 # min is 0.07
