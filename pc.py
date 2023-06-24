@@ -59,13 +59,13 @@ class Monitor:
 
 
 class Keyboard:
-    def __init__(self, keys):
-        self.keys = keys
+    def __init__(self, keys_map):
+        self.keys_map = keys_map
 
     def execute(self, action):
-        assert len(action) == len(self.keys), f"wrong action size"
+        assert len(action) == len(self.keys_map), f"wrong action size"
 
-        for status, key in zip(action, self.keys):
+        for status, key in zip(action, self.keys_map):
             if status:
                 pyautogui.keyDown(key)
             else:
@@ -85,9 +85,10 @@ class FileAdmin:
     SAFE_FAIL_SLEEP_TIME = 10
 
     @staticmethod
-    def safe_save_net(net, name, indent=0):
-        Logger.indent(indent)
-        print(f"saving {name}", end='\r')
+    def safe_save_net(net, name, indent=0, quiet=False):
+        if not quiet:
+            Logger.indent(indent)
+            print(f"saving {name}", end='\r')
         done = False
         device = net.device
         while not done:
@@ -97,22 +98,25 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                print("")
-                FileAdmin.safe_remove(name, indent=indent + 4)
+                if not quiet:
+                    print("")
+                FileAdmin.safe_remove(name, indent=indent+4, quiet=quiet)
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         net = net.to(device)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"saving {name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"saving {name} completed")
 
     @staticmethod
-    def safe_load_net(net, name, indent=0):
+    def safe_load_net(net, name, indent=0, quiet=False):
         if not os.path.exists(name):
             return net
 
-        Logger.indent(indent)
-        print(f"loading {name}", end='\r')
+        if not quiet:
+            Logger.indent(indent)
+            print(f"loading {name}", end='\r')
         done = False
         device = net.device
         while not done:
@@ -123,10 +127,11 @@ class FileAdmin:
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         net = net.to(device)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"loading {name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"loading {name} completed")
         return net
 
     @staticmethod
@@ -153,7 +158,6 @@ class FileAdmin:
 
     @staticmethod
     def safe_save(target, name, indent=0, quiet=False):
-        # print(f"safe_save {name = }")
         if not quiet:
             Logger.indent(indent)
             print(f"saving {name}", end='\r')
@@ -169,7 +173,7 @@ class FileAdmin:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
                 if not quiet:
                     print("")
-                FileAdmin.safe_remove(name, indent=indent + 4, quiet=quiet)
+                FileAdmin.safe_remove(name, indent=indent+4, quiet=quiet)
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
         if not quiet:
@@ -178,9 +182,10 @@ class FileAdmin:
             print(f"saving {name} completed")
 
     @staticmethod
-    def safe_copy(tmp_name, target_name, indent=0):
-        Logger.indent(indent)
-        print(f"copying {tmp_name} to {target_name}", end='\r')
+    def safe_copy(tmp_name, target_name, indent=0, quiet=False):
+        if not quiet:
+            Logger.indent(indent)
+            print(f"copying {tmp_name} to {target_name}", end='\r')
         done = False
         while not done:
             try:
@@ -189,17 +194,18 @@ class FileAdmin:
                 done = True
             except:
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-                print("")
-                FileAdmin.safe_remove(target_name, indent=indent + 4)
+                if not quiet:
+                    print("")
+                FileAdmin.safe_remove(target_name, indent=indent+4, quiet=quiet)
                 time.sleep(FileAdmin.SAFE_FAIL_SLEEP_TIME)
-        Logger.clear_line()
-        Logger.indent(indent)
         time.sleep(FileAdmin.SAFE_SLEEP_TIME)
-        print(f"copying {target_name} completed")
+        if not quiet:
+            Logger.clear_line()
+            Logger.indent(indent)
+            print(f"copying {target_name} completed")
 
     @staticmethod
     def safe_load(target, name, indent=0, quiet=False):
-        # print(f"safe_load {name = }")
         if not os.path.exists(name):
             return target
 
