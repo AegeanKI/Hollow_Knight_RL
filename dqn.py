@@ -40,9 +40,9 @@ class DQN(nn.Module):
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
-                                                           base_lr=lr/ 10,
+                                                           base_lr=lr/10,
                                                            max_lr=lr,
-                                                           gamma=gamma,
+                                                           gamma=1.0,
                                                            step_size_up=total_steps/(2*20),
                                                            step_size_down=total_steps/(2*20),
                                                            cycle_momentum=False)

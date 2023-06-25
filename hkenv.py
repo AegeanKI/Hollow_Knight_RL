@@ -70,28 +70,18 @@ class Operation:
         return res
 
     @staticmethod
-    def replace_conflict(action_idx, action):
-        if torch.rand(1) < 0.1:
-            return action_idx, action
+    def add_key(action_idx, action, key):
+        new_action = torch.clone(action)
+        new_action[key] = 1
+        new_action_idx = action_idx + Operation.key_idx(key)
+        return new_action_idx, new_action
 
-        has_left = Operation.check_contain(action, Keys.LEFT)
-        has_right = Operation.check_contain(action, Keys.RIGHT)
-        has_jump = Operation.check_contain(action, Keys.JUMP)
-        has_attack = Operation.check_contain(action, Keys.ATTACK)
-        has_dash = Operation.check_contain(action, Keys.DASH)
-        has_spell = Operation.check_contain(action, Keys.SPELL)
-        has_sdash = Operation.check_contain(action, Keys.SDASH)
-
-        if has_left and has_right:
-            change_key = Keys.LEFT if torch.rand(1) < 0.5 else Keys.RIGHT
-            action[change_key] = 0
-            action_idx = action_idx - Operation.key_idx(change_key)
-
-        if has_sdash:
-            if has_jump or has_attack or has_dash or has_spell:
-                action[Keys.SDASH] = 0
-                action_idx = action_idx - Operation.key_idx(Keys.SDASH)
-        return action_idx, action
+    @staticmethod
+    def remove_key(action_idx, action, key):
+        new_action = torch.clone(action)
+        new_action[key] = 0
+        new_action_idx = action_idx - Operation.key_idx(key)
+        return new_action_idx, new_action
 
 
 class HKEnv():
@@ -111,7 +101,7 @@ class HKEnv():
     LOSE_REWARD = -10
     KEY_CONFLICT_REWARD = -10
     KEY_HOLD_REWARD = -10
-    NOTHING_HAPPEN_REWARD = -0.1
+    NOTHING_HAPPEN_REWARD = -0.01
 
     def __init__(self, observe_size, info_size, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
@@ -120,8 +110,8 @@ class HKEnv():
         self.info_size = info_size
         self.device = device
 
-        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.02, high=1, low=0.5)
-        self.character_remain_weight_counter = Counter(init=1, increase=0.01, high=2, low=1)
+        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.01, high=1, low=0.5)
+        self.character_remain_weight_counter = Counter(init=-2, increase=0.01, high=-1, low=-2)
         self._reset_env()
         self.observe_base = cv2.imread("locator/base_field.png", cv2.IMREAD_GRAYSCALE)
         self.observe_base = torch.from_numpy(self.observe_base).to(self.device)
@@ -133,7 +123,10 @@ class HKEnv():
         self.prev_time = time.time()
         self.key_hold = torch.zeros(len(Keys))
         self._counter_reset()
+
+        time.sleep(0.2)
         self.keyboard.execute(Operation.NULL)
+        time.sleep(0.2)
 
     def observe(self):
         # cur_time = time.time()
@@ -152,26 +145,39 @@ class HKEnv():
         # self.prev_time = cur_time
         return observe, enemy_remain, character_remain
 
-    def _start(self):
+    def _prepare(self):
         while not self.monitor.find(self.MENU_REGION, "locator\menu_badge.png"):
             stop = False
             while not self.monitor.is_active():
                 if not stop:
-                    print(f"stop")
+                    print(f"stop", end='\r')
                     stop = True
                 time.sleep(10)
             if stop:
                 self.monitor.activate_move_to_desired()
+                del stop
 
+            assert torch.sum(Operation.UP) == 1, f"something wrong in loop, {Operation.UP = }"
             self.keyboard.execute(Operation.UP)
             time.sleep(0.2)
+            assert torch.sum(Operation.NULL) == 0, f"something wrong in loop, {Operation.UP = }"
             self.keyboard.execute(Operation.NULL)
             time.sleep(0.2)
 
+        assert torch.sum(Operation.UP) == 1, f"something wrong, {Operation.UP = }"
         self.keyboard.execute(Operation.JUMP)
+        time.sleep(0.2)
+        assert torch.sum(Operation.NULL) == 0, f"something wrong, {Operation.UP = }"
         self.keyboard.execute(Operation.NULL)
+        time.sleep(0.2)
 
-        del stop
+    def update_key_hold(self, action, beaten):
+        for key in Keys:
+            self.key_hold[key] = self.key_hold[key] + 1 if Operation.check_contain(action, key) else 0
+
+        if beaten:
+            for i in range(4, len(Keys)):
+                self.key_hold[i] = 0
 
     def step(self, action):
         self.keyboard.execute(action)
@@ -181,15 +187,20 @@ class HKEnv():
         lose = (character_remain == 0)
         done = (win or lose)
 
+        hit = enemy_remain < self.prev_enemy_remain
+        beaten = character_remain < self.prev_character_remain
+        self.update_key_hold(action, beaten)
+
         reward = self._calculate_reward(enemy_remain, character_remain, action)
         self._counter_step()
 
-        info = torch.zeros(self.info_size)
-        if enemy_remain < self.prev_enemy_remain:
+        info = torch.zeros(self.info_size).to(self.device)
+        info[:len(Keys)] = self.key_hold
+
+        if hit:
             self.enemy_remain_weight_counter.reset()
-        if character_remain < self.prev_character_remain:
+        if beaten:
             self.character_remain_weight_counter.reset()
-            info[0] = 1 # get hit info
 
         self.prev_character_remain = character_remain
         self.prev_enemy_remain = enemy_remain
@@ -200,8 +211,8 @@ class HKEnv():
 
     def reset(self, n_frames, observe_interval):
         self._reset_env()
-        self._start()
-        time.sleep(3)
+        self._prepare()
+        time.sleep(4.5)
         return self.for_warmup(n_frames, observe_interval)
 
     def for_warmup(self, n_frames, observe_interval):
@@ -216,7 +227,7 @@ class HKEnv():
             info_list.append(info.to(self.device))
             time.sleep(0.02 + observe_interval - 0.07)
 
-            # observe_cpu_numpy = obs.cpu().numpy()
+            # observe_cpu_numpy = observe.cpu().numpy()
             # cv2.imwrite(f"images/obs{i}.png", observe_cpu_numpy)
 
         return observe_list, action_list, info_list
@@ -224,19 +235,82 @@ class HKEnv():
     def close(self):
         self._reset_env()
 
-    def _check_key_hold_too_long(self, action):
-        for i in range(len(Keys)):
-            if action[i]:
-                self.key_hold[i] = self.key_hold[i] + 1
-            else:
-                self.key_hold[i] = 0
+    def _replace_conflict_action(self, action_idx, action):
+        if Operation.check_contain(action, Keys.LEFT) and Operation.check_contain(action, Keys.RIGHT):
+            change_key = Keys.LEFT if torch.rand(1) < 0.5 else Keys.RIGHT
+            action_idx, action = Operation.remove_key(action_idx, action, change_key)
 
-        if self.key_hold[Keys.JUMP] > 5:
+        if Operation.check_contain(action, Keys.SDASH):
+            if (Operation.check_contain(action, Keys.JUMP) or Operation.check_contain(action, Keys.ATTACK) or
+                Operation.check_contain(action, Keys.DASH) or Operation.check_contain(action, Keys.SPELL)):
+                action_idx, action = Operation.remove_key(action_idx, action, Keys.SDASH)
+        return action_idx, action
+
+    def _complicate_action(self, action_idx, action):
+        if (self.key_hold[Keys.JUMP] > 0 and self.key_hold[Keys.JUMP] <= 6 and
+            not Operation.check_contain(action, Keys.JUMP)):
+            action_idx, action = Operation.add_key(action_idx, action, Keys.JUMP)
+
+        if Operation.check_contain(action, Keys.SPELL):
+            if (not Operation.check_contain(action, Keys.UP) and not Operation.check_contain(action, Keys.DOWN) and
+                not Operation.check_contain(action, Keys.LEFT) and not Operation.check_contain(action, Keys.RIGHT)):
+                change_key = torch.tensor([Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT])[torch.randint(4, (1,))[0]]
+                action_idx, action = Operation.add_key(action_idx, action, change_key)
+
+        if Operation.check_contain(action, Keys.DASH):
+            if not Operation.check_contain(action, Keys.LEFT) and not Operation.check_contain(action, Keys.RIGHT):
+                change_key = Keys.LEFT if torch.rand(1) < 0.5 else Keys.RIGHT
+                action_idx, action = Operation.add_key(action_idx, action, change_key)
+
+        if self.key_hold[Keys.ATTACK] > 14 and not Operation.check_contain(action, Keys.ATTACK):
+            if (not Operation.check_contain(action, Keys.UP) and not Operation.check_contain(action, Keys.DOWN) and
+                not Operation.check_contain(action, Keys.LEFT) and not Operation.check_contain(action, Keys.RIGHT)):
+                change_key = torch.tensor([Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT])[torch.randint(4, (1,))[0]]
+                action_idx, action = Operation.add_key(action_idx, action, change_key)
+
+                if (change_key == Keys.LEFT or change_key == Keys.RIGHT) and torch.rand(1) < 0.1:
+                    action_idx, action = Operation.add_key(action_idx, action, Keys.DASH)
+        return action_idx, action
+
+    def _simplify_action(self, action_idx, action):
+        if self.key_hold[Keys.ATTACK] > 14 and Operation.check_contain(action, Keys.ATTACK):
+            action_idx, action = Operation.remove_key(action_idx, action, Keys.ATTACK)
+
+        if self.key_hold[Keys.JUMP] > 6 and Operation.check_contain(action, Keys.JUMP):
+            action_idx, action = Operation.remove_key(action_idx, action, Keys.JUMP)
+
+        if self.key_hold[Keys.DASH] > 4 and Operation.check_contain(action, Keys.DASH):
+            action_idx, action = Operation.remove_key(action_idx, action, Keys.DASH)
+
+        if self.key_hold[Keys.SPELL] > 7 and Operation.check_contain(action, Keys.SPELL):
+            action_idx, action = Operation.remove_key(action_idx, action, Keys.SPELL)
+
+        if self.key_hold[Keys.SDASH] > 10 and Operation.check_contain(action, Keys.SDASH):
+            action_idx, action = Operation.remove_key(action_idx, action, Keys.SDASH)
+
+        if Operation.check_contain(action, Keys.UP) and Operation.check_contain(action, Keys.DOWN):
+            change_key = Keys.UP if torch.rand(1) < 0.5 else Keys.DOWN
+            action_idx, action = Operation.remove_key(action_idx, action, change_key)
+        return action_idx, action
+
+    def mutate_action(self, action_idx, action):
+        if torch.rand(1) < 0.9:
+            action_idx, action = self._replace_conflict_action(action_idx, action)
+        if torch.rand(1) < 0.1:
+            action_idx, action = self._simplify_action(action_idx, action)
+        if torch.rand(1) < 0.1:
+            action_idx, action = self._complicate_action(action_idx, action)
+        return action_idx, action
+
+    def _check_key_hold_too_long(self, action):
+        if self.key_hold[Keys.JUMP] > 6:
             return True
-        if self.key_hold[Keys.DASH] > 3:
+        if self.key_hold[Keys.DASH] > 4:
             return True
-        if self.key_hold[Keys.SPELL] > 3:
+        if self.key_hold[Keys.SPELL] > 7:
             return True
+        # if self.key_hold[Keys.SDASH] > 10:
+        #     return True
         return False
 
     def _calculate_reward(self, enemy_remain, character_remain, action):
@@ -245,13 +319,12 @@ class HKEnv():
 
         done_reward = 0
         if win:
-            done_reward = self.WIN_REWARD + math.log(character_remain + 1)
+            done_reward = self.WIN_REWARD * (character_remain + 1)
         elif lose:
             done_reward = self.LOSE_REWARD
 
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
-        character_hp_reward = (character_remain - self.prev_character_remain) * self.character_remain_weight_counter.val
-        # key_conflict_reward = 0 if not Operation.count_conflict(action) else self.KEY_CONFLICT_REWARD
+        character_hp_reward = (self.prev_character_remain - character_remain) * self.character_remain_weight_counter.val
         key_conflict_reward = Operation.count_conflict(action) * self.KEY_CONFLICT_REWARD
         key_hold_reward = 0 if not self._check_key_hold_too_long(action) else self.KEY_HOLD_REWARD
 
@@ -261,7 +334,8 @@ class HKEnv():
 
         reward = done_reward + enemy_hp_reward + character_hp_reward
         reward = reward + key_conflict_reward + key_hold_reward + nothing_happen_reward
-        # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }, {key_reward = }, {reward = }")
+        # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }", end='')
+        # print(f", {key_conflict_reward = }, {key_hold_reward = }, {nothing_happen_reward = }, {reward = }")
         del win, lose
         del done_reward, enemy_hp_reward, character_hp_reward
         del key_conflict_reward, key_hold_reward, nothing_happen_reward

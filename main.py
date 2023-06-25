@@ -7,6 +7,7 @@ import torch
 import psutil
 import numpy as np
 
+from collections import deque
 from argparse import ArgumentParser
 from chainer import serializers
 from torch.backends import cudnn
@@ -26,7 +27,7 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
     action_idx = dqn.choose_action_idx(state, condition, status, evaluate=True)
     # warmup completed
 
-    experiences = []
+    experiences = deque()
     t = 0
     rewards = 0
     observe_list, action_list, info_list = env.reset(n_frames, observe_interval)
@@ -35,7 +36,8 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
     while True:
         action_idx = dqn.choose_action_idx(state, condition, status)
         action = Operation.get_by_idx(action_idx)
-        action_idx, action = Operation.replace_conflict(action_idx, action)
+        if train:
+            action_idx, action = env.mutate_action(action_idx, action)
         observe, info, reward, done, enemy_remain = env.step(action)
 
         next_state, next_condition, next_status = dqn.convert_to_next((state, condition, status),
@@ -69,7 +71,7 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
     del episode_start_time
     del t, rewards
 
-    return experiences
+    return list(experiences)
 
 def read_args():
     parser = ArgumentParser()
@@ -89,18 +91,18 @@ if __name__ == "__main__":
     print(f"{device = }")
     cudnn.benchmark = True
 
-    n_frames = 12
+    n_frames = 8
     h = 384
     w = 216
-    info_size = 1 # got hit
-    memory_capacity = 2000
+    info_size = len(Keys) # keys hold
+    memory_capacity = 3000
     target_replace_iter = memory_capacity // 2
     net_dir = "nets"
     memory_dir = "memories"
     lr = 0.1
     epsilon = 0.15
     gamma = 0.9
-    n_episodes = 3000
+    n_episodes = 2000
     n_episodes_save = 20
     batch_learn = memory_capacity // 4
     observe_interval = 0.09 # min is 0.07
@@ -151,6 +153,8 @@ if __name__ == "__main__":
 
                 if dqn.can_learn:
                     for i_evaluate in range(3):
+                        Logger.indent(4)
+                        print("evaluating:")
                         _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
 
         print(f"training completed")
