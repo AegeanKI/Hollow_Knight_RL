@@ -63,9 +63,9 @@ class Keyboard:
         self.keys_map = keys_map
 
     def execute(self, action):
-        assert len(action) == len(self.keys_map), f"wrong action size"
+        assert len(action.keys) == len(self.keys_map), f"wrong action size"
 
-        for status, key in zip(action, self.keys_map):
+        for status, key in zip(action.keys, self.keys_map):
             if status:
                 pyautogui.keyDown(key)
             else:

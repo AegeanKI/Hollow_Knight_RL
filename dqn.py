@@ -7,7 +7,7 @@ import numpy as np
 from collections import deque
 
 from pc import FileAdmin
-# from hkenv import Operation
+from hkenv import Action
 from utils import Memory
 from network import resnet18
 
@@ -68,7 +68,7 @@ class DQN(nn.Module):
         fake_condition = torch.rand(self.condition_size).to(self.device)
         fake_status = torch.rand(self.status_size).to(self.device)
 
-        action_idx = self.choose_action_idx(fake_state, fake_condition, fake_status, True)
+        action = self.choose_action(fake_state, fake_condition, fake_status, True)
 
         q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition, fake_status)
         q_next = self.target_net(fake_state.unsqueeze(0), fake_condition, fake_status).detach()
@@ -80,13 +80,13 @@ class DQN(nn.Module):
         del fake_state, fake_condition, fake_status
         del q_eval, q_next, loss
 
-    def choose_action_idx(self, state, condition, status, evaluate=False):
+    def choose_action(self, state, condition, status, evaluate=False):
         if torch.rand(1) < self.epsilon and not evaluate:
             actions_value = torch.rand(self.out_classes)
         else:
             actions_value = self.eval_net(state.unsqueeze(0), condition, status)
-        action_idx = torch.argmax(actions_value).to(self.device)
-        return action_idx
+        action_idx = torch.argmax(actions_value)
+        return Action(action_idx).to(self.device)
 
     def convert_to_init(self, elements_list):
         res = []
@@ -122,7 +122,7 @@ class DQN(nn.Module):
         condition = memory_data[1].to(torch.int64).to(self.device)
         status = memory_data[2].to(self.device)
         action_idx = memory_data[3].to(torch.int64).to(self.device)
-        action = memory_data[4].to(torch.int64).to(self.device)
+        action_keys = memory_data[4].to(torch.int64).to(self.device)
         reward = memory_data[5].to(self.device)
         next_state = memory_data[6].to(self.device)
         next_condition = memory_data[7].to(torch.int64).to(self.device)
@@ -130,7 +130,7 @@ class DQN(nn.Module):
 
         del idx, memory_data
         return (state, condition, status,
-                action_idx, action, reward,
+                action_idx, action_keys, reward,
                 next_state, next_condition, next_status)
 
     @property
@@ -141,7 +141,7 @@ class DQN(nn.Module):
     def learn(self, batch_learn=1):
         for i_learn in range(batch_learn):
             (state, condition, status,
-             action_idx, action, reward,
+             action_idx, action_keys, reward,
              next_state, next_condition, next_status) = self.random_sample_experience()
 
             q_eval = self.eval_net(state.unsqueeze(0), condition, status)[0, action_idx]
@@ -160,7 +160,7 @@ class DQN(nn.Module):
                 self.target_net.load_state_dict(self.eval_net.state_dict())
 
             del state, condition, status
-            del action_idx, action, reward
+            del action_idx, action_keys, reward
             del next_state, next_condition, next_status
             del q_eval, q_next, q_target, loss
 

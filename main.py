@@ -13,39 +13,39 @@ from chainer import serializers
 from torch.backends import cudnn
 from dqn import DQN
 from pc import Logger
-from hkenv import Keys, Operation, HKEnv
+from hkenv import Keys, Action, HKEnv
 from collections import namedtuple, deque
 
 def limit_cpu():
     p = psutil.Process()
     p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
 
-def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
+def interact(env, dqn, i_episode, train=True, indent=0):
     dqn.warmup()
-    observe_list, action_list, info_list = env.for_warmup(n_frames, observe_interval)
-    state, condition, status = dqn.convert_to_init((observe_list, action_list, info_list))
-    action_idx = dqn.choose_action_idx(state, condition, status, evaluate=True)
+    observe_list, action_key_list, info_list = env.init_observe(n_frames)
+    state, condition, status = dqn.convert_to_init((observe_list, action_key_list, info_list))
+    action = dqn.choose_action(state, condition, status, evaluate=True)
     # warmup completed
 
     experiences = deque()
     t = 0
     rewards = 0
-    observe_list, action_list, info_list = env.reset(n_frames, observe_interval)
-    state, condition, status = dqn.convert_to_init((observe_list, action_list, info_list))
+    cur_time = time.time()
+    observe_list, action_key_list, info_list = env.reset(n_frames)
+    state, condition, status = dqn.convert_to_init((observe_list, action_key_list, info_list))
     episode_start_time = time.time()
     while True:
-        action_idx = dqn.choose_action_idx(state, condition, status)
-        action = Operation.get_by_idx(action_idx)
+        action = dqn.choose_action(state, condition, status)
         if train:
-            action_idx, action = env.mutate_action(action_idx, action)
+            action.mutate(env.key_hold, env.observe_interval)
         observe, info, reward, done, enemy_remain = env.step(action)
 
         next_state, next_condition, next_status = dqn.convert_to_next((state, condition, status),
-                                                                      (observe, action, info))
+                                                                      (observe, action.keys, info))
 
         if train:
             experiences.append(dqn.convert_to_experience(state, condition, status,
-                                                         action_idx, action, reward,
+                                                         action.idx, action.keys, reward,
                                                          next_state, next_condition, next_status))
 
         rewards += reward.item()
@@ -56,17 +56,17 @@ def interact(env, dqn, observe_interval, i_episode, train=True, indent=0):
             print(f"Episode {i_episode} finished after {t + 1} timesteps", end='')
             print(f", total rewards {rewards:.4f}, cur_enemy_remain = {enemy_remain}", end='')
             print(f", ops = {(t + 1) / (time.time() - episode_start_time):.4f}")
+            print(f"{time.time() - episode_start_time = }")
             break
 
         state, condition, status = next_state, next_condition, next_status
         t += 1
-        time.sleep(0.02 + observe_interval - 0.07)
 
-        del action_idx, action
+        del action
         del observe, info, reward, done, enemy_remain
         del next_state, next_condition, next_status
 
-    del observe_list, action_list, info_list
+    del observe_list, action_key_list, info_list
     del state, condition, status
     del episode_start_time
     del t, rewards
@@ -100,18 +100,18 @@ if __name__ == "__main__":
     net_dir = "nets"
     memory_dir = "memories"
     lr = 0.1
-    epsilon = 0.15
-    gamma = 0.9
+    epsilon = 0.2
+    gamma = 0.99
     n_episodes = 2000
     n_episodes_save = 20
     batch_learn = memory_capacity // 4
-    observe_interval = 0.09 # min is 0.07
+    observe_interval = 0.1 
 
     dqn = DQN(state_size=(n_frames, w, h),
               condition_size=(n_frames, len(Keys)),
               status_size=(n_frames, info_size),
               in_channels=n_frames,
-              out_classes=len(Operation.POSSIBLE_ACTION),
+              out_classes=len(Action.ALL_POSSIBLE),
               lr=lr,
               total_steps=n_episodes*batch_learn,
               epsilon=epsilon,
@@ -123,6 +123,7 @@ if __name__ == "__main__":
               device=device)
 
     env = HKEnv(observe_size=(h, w),
+                observe_interval=observe_interval,
                 info_size=info_size,
                 device=device)
 
@@ -132,14 +133,14 @@ if __name__ == "__main__":
 
     if args.evaluate:
         for i_evaluate in range(3):
-            _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
+            _ = interact(env, dqn, i_evaluate, train=False, indent=4)
     else:
         start_learning = False
         for i_train in range(n_episodes):
             torch.cuda.empty_cache()
             # print(f"{len(dqn.memory) = }")
 
-            experiences = interact(env, dqn, observe_interval, i_train, train=True)
+            experiences = interact(env, dqn, i_train, train=True)
             dqn.store_experiences(experiences)
 
             if dqn.can_learn:
@@ -152,10 +153,11 @@ if __name__ == "__main__":
                 dqn.save(f"dqn_training")
 
                 if dqn.can_learn:
+                    Logger.indent(4)
+                    print("evaluating:")
                     for i_evaluate in range(3):
-                        Logger.indent(4)
-                        print("evaluating:")
-                        _ = interact(env, dqn, observe_interval, i_evaluate, train=False, indent=4)
+                        _ = interact(env, dqn, i_evaluate, train=False, indent=4)
+            break
 
         print(f"training completed")
         dqn.save(f"dqn_completed")
