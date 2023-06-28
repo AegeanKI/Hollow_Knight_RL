@@ -87,7 +87,7 @@ class DRQN(nn.Module):
 
     def learn(self, times=1):
         for i_learn in range(times):
-            n_frames_experiences = self.memory.random_sample(n_frames)
+            n_frames_experiences = self.memory.random_sample(self.n_frames)
             n_frames_experiences = [data.to(self.device) for data in n_frames_experiences]
 
             (n_frames_state, n_frames_condition,

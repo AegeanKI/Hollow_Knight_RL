@@ -100,19 +100,19 @@ if __name__ == "__main__":
     episode_learn_times = memory_capacity // 4
     observe_interval = 0.1 
 
-    drqn = DQN(state_size=(3, h, w),
-              condition_size=len(Keys),
-              n_frames=n_frames,
-              out_classes=len(Action.ALL_POSSIBLE),
-              lr=lr,
-              total_steps=n_episodes*episode_learn_times,
-              epsilon=epsilon,
-              gamma=gamma,
-              memory_capacity=memory_capacity,
-              target_replace_iter=target_replace_iter,
-              net_dir=net_dir,
-              memory_dir=memory_dir,
-              device=device)
+    drqn = DRQN(state_size=(3, h, w),
+                condition_size=len(Keys),
+                n_frames=n_frames,
+                out_classes=len(Action.ALL_POSSIBLE),
+                lr=lr,
+                total_steps=n_episodes*episode_learn_times,
+                epsilon=epsilon,
+                gamma=gamma,
+                memory_capacity=memory_capacity,
+                target_replace_iter=target_replace_iter,
+                net_dir=net_dir,
+                memory_dir=memory_dir,
+                device=device)
 
     env = HKEnv(observe_size=(w, h),
                 observe_interval=observe_interval,
