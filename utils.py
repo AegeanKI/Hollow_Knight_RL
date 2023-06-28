@@ -84,7 +84,7 @@ class Memory():
         idx = None
         while count_done:
             #  (state, condition, action_idx, reward, done, next_state, next_condition)
-            weights = torch.tensor(self.buffers[3]).view(-1).abs() + 1 / self.maxlen
+            weights = self.buffers[3].view(-1).abs() + 1 / self.maxlen
             idx = torch.multinomial(weights[n_frames - 1:], 1)[0] + n_frames - 1 # idx is last
             count_done = self.buffers[4][idx + 1 - n_frames:idx + 1 - 1].sum() # last frame can be done
 

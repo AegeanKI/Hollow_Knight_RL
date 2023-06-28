@@ -83,12 +83,12 @@ class DRQN(nn.Module):
 
     @property
     def can_learn(self):
-        # return len(self.memory) == self.memory.maxlen
-        return len(self.memory) > 30
+        return len(self.memory) == self.memory.maxlen
 
     def learn(self, times=1):
         for i_learn in range(times):
-            n_frames_experiences = self.memory.random_sample(self.n_frames)
+            print(f"learning {i_learn + 1} / {times}", end='\r')
+            n_frames_experiences = self.memory.prioritize_random_sample(self.n_frames)
             n_frames_experiences = [data.to(self.device) for data in n_frames_experiences]
 
             (n_frames_state, n_frames_condition,
