@@ -88,7 +88,7 @@ class Memory():
             idx = torch.multinomial(weights[n_frames - 1:], 1)[0] + n_frames - 1 # idx is last
             count_done = self.buffers[4][idx + 1 - n_frame:idx + 1 - 1].sum() # last frame can be done
 
-        return self[idx:idx + n_frames]
+        return self[idx + 1 - n_frame:idx + 1]
 
 def unpackbits(x, num_bits):
     if np.issubdtype(x.dtype, np.floating):
