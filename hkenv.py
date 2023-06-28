@@ -30,7 +30,7 @@ class Action:
     OBSERVE_INTERVAL_ERROR = 0.02
 
     def __init__(self, idx):
-        self.idx = idx
+        self._idx = idx
         self.device = "cpu"
 
     @staticmethod
@@ -38,17 +38,17 @@ class Action:
         return 2 ** key
 
     def has(self, key):
-        return Action.ALL_POSSIBLE[self.idx][key].item()
+        return Action.ALL_POSSIBLE[self._idx][key].item()
 
     def _add(self, key):
         if self.has(key):
             return
-        self.idx = self.idx + Action.key_idx(key)
+        self._idx = self._idx + Action.key_idx(key)
 
     def _remove(self, key):
         if not self.has(key):
             return
-        self.idx = self.idx - Action.key_idx(key)
+        self._idx = self._idx - Action.key_idx(key)
 
     def to(self, device):
         self.device = device
@@ -56,7 +56,11 @@ class Action:
 
     @property
     def keys(self):
-        return torch.clone(Action.ALL_POSSIBLE[self.idx]).to(self.device)
+        return torch.clone(Action.ALL_POSSIBLE[self._idx]).to(self.device)
+
+    @property
+    def idx(self):
+        return self._idx.to(self.device)
 
     @property
     def conflict_num(self):

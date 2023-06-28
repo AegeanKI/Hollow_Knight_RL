@@ -41,9 +41,6 @@ def interact(env, drqn, i_episode, train=True, indent=0):
             for dq, val in zip(episode_experiences, experience):
                 dq.append(val.unsqueeze(0).cpu() if val.ndim == 0 else val.cpu())
 
-            if drqn.can_learn:
-                drqn.learn(times=1)
-
         t += 1
         rewards += reward.item()
         state, condition = next_state, next_condition
@@ -138,6 +135,9 @@ if __name__ == "__main__":
             elif not start_learning:
                 start_learning = True
                 print(f"enough memory, start learning")
+
+            if drqn.can_learn:
+                drqn.learn(times=episode_learn_times)
 
             if (i_train % n_episodes_save) == n_episodes_save - 1:
                 drqn.save(f"drqn_training")

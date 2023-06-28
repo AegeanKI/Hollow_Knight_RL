@@ -83,7 +83,8 @@ class DRQN(nn.Module):
 
     @property
     def can_learn(self):
-        return len(self.memory) == self.memory.maxlen
+        # return len(self.memory) == self.memory.maxlen
+        return len(self.memory) > 30
 
     def learn(self, times=1):
         for i_learn in range(times):
