@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from functools import partial
-from collections import OrderedDict
 from torchvision import models
 
 class ResNetLSTM(nn.Module):
@@ -27,17 +24,13 @@ class ResNetLSTM(nn.Module):
         return next(self.parameters()).device
 
     def forward(self, x, condition):
+        out = self.encoder(x)
+
         self.h = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
         self.c = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
-
-        out = self.encoder(x)
         out = out.view(out.size(0), out.size(1))
-
         out, _ = self.lstm(torch.cat((out, condition), dim=1), (self.h, self.c))
-        # out, _ = self.lstm(out, (self.h, self.c))
 
-        # out = out.view(out.size(0), -1)
-        # out = self.decoder(torch.cat((out, condition), dim=1))
         out = self.decoder(out)
         return out
 

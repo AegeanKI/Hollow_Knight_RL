@@ -1,17 +1,12 @@
 import time
-import math
 import enum
 
 import cv2
 import torch
-import pyautogui
 import numpy as np
 
 from pc import Monitor, Keyboard
 from utils import Counter, unpackbits
-
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0.
 
 class Keys(enum.IntEnum):
     UP = 0
@@ -22,17 +17,17 @@ class Keys(enum.IntEnum):
     ATTACK = 5
     DASH = 6
     SPELL = 7
-    SDASH = 8
 
 class Action:
-    KEYS_MAP = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v', 's')
+    KEYS_MAP = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v')
     ALL_POSSIBLE = unpackbits(np.arange(2 ** len(Keys)), len(Keys))
 
-    ATTACK_HOLD_TIME = 1.35 + 0.1
-    SPELL_HOLD_TIME = 0.62 + 0.1
-    DASH_HOLD_TIME = 0.4 + 0.1
-    JUMP_HOLD_TIME = 0.5 + 0.1
-    SDASH_HOLD_TIME = 1.0 + 0.1
+    ATTACK_HOLD_TIME = 1.35
+    SPELL_HOLD_TIME = 0.62
+    DASH_HOLD_TIME = 0.4
+    JUMP_HOLD_TIME = 0.5
+
+    OBSERVE_INTERVAL_ERROR = 0.02
 
     def __init__(self, idx):
         self.idx = idx
@@ -65,16 +60,9 @@ class Action:
 
     @property
     def conflict_num(self):
-        res = 0
-        if self.has(Keys.LEFT) and self.has(Keys.RIGHT):
-            res = res + 1
-        if self.has(Keys.SDASH):
-            res = res + self.has(Keys.JUMP) + self.has(Keys.ATTACK) + self.has(Keys.DASH) + self.has(Keys.SPELL)
-        return res
+        return (self.has(Keys.LEFT) and self.has(Keys.RIGHT))
 
     def mutate(self, key_hold, observe_interval):
-        if torch.rand(1) < 0.9:
-            self._remove_conflict()
         if torch.rand(1) < 0.2:
             self._simplify(key_hold, observe_interval)
         if torch.rand(1) < 0.2:
@@ -82,19 +70,11 @@ class Action:
         if torch.rand(1) < 0.2:
             self._replace()
 
-    def _remove_conflict(self):
-        if self.has(Keys.LEFT) and self.has(Keys.RIGHT):
-            candidates = [Keys.LEFT, Keys.RIGHT]
-            change_key = candidates[torch.randint(len(candidates), (1,))]
-            self._remove(change_key)
-
-        if self.has(Keys.JUMP) or self.has(Keys.ATTACK) or self.has(Keys.DASH) or self.has(Keys.SDASH):
-            if self.has(Keys.SDASH):
-                self._remove(Keys.SDASH)
-
     def _complicate(self, key_hold, observe_interval):
-        if (key_hold[Keys.JUMP] > 0 and key_hold[Keys.JUMP] < Action.JUMP_HOLD_TIME / observe_interval and
-            not self.has(Keys.JUMP)):
+        observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
+
+        if (not self.has(Keys.JUMP) and key_hold[Keys.JUMP] > 0 and
+            key_hold[Keys.JUMP] < Action.JUMP_HOLD_TIME / observe_interval):
             self._add(Keys.JUMP)
 
         if not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and not self.has(Keys.DOWN):
@@ -102,14 +82,6 @@ class Action:
                 candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
                 change_key = candidates[torch.randint(len(candidates), (1,))]
                 self._add(change_key)
-
-        if not self.has(Keys.LEFT) and not self.has(Keys.RIGHT):
-            if self.has(Keys.DASH):
-                candidates = [Keys.LEFT, Keys.RIGHT]
-                change_key = candidates[torch.randint(len(candidates), (1,))]
-                self._add(change_key)
-
-        if not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and not self.has(Keys.DOWN):
             if key_hold[Keys.ATTACK] > Action.ATTACK_HOLD_TIME / observe_interval and not self.has(Keys.ATTACK):
                 candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
                 change_key = candidates[torch.randint(len(candidates), (1,))]
@@ -118,22 +90,23 @@ class Action:
                 if (change_key == Keys.LEFT or change_key == Keys.RIGHT) and torch.rand(1) < 0.5:
                     self._add(Keys.DASH)
 
+        if not self.has(Keys.LEFT) and not self.has(Keys.RIGHT):
+            if self.has(Keys.DASH):
+                candidates = [Keys.LEFT, Keys.RIGHT]
+                change_key = candidates[torch.randint(len(candidates), (1,))]
+                self._add(change_key)
 
     def _simplify(self, key_hold, observe_interval):
+        observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
+
         if key_hold[Keys.ATTACK] and self.has(Keys.ATTACK):
             self._remove(Keys.ATTACK)
 
-        if key_hold[Keys.JUMP] > Action.JUMP_HOLD_TIME / observe_interval and self.has(Keys.JUMP):
-            self._remove(Keys.JUMP)
-
-        if key_hold[Keys.DASH] > Action.DASH_HOLD_TIME / observe_interval and self.has(Keys.DASH):
-            self._remove(Keys.DASH)
-
-        if key_hold[Keys.SPELL] > Action.SPELL_HOLD_TIME / observe_interval and self.has(Keys.SPELL):
-            self._remove(Keys.SPELL)
-
-        if key_hold[Keys.SDASH] > Action.SDASH_HOLD_TIME / observe_interval and self.has(Keys.SDASH):
-            self._remove(Keys.SDASH)
+        for key, hold_time in [(Keys.JUMP, Action.JUMP_HOLD_TIME),
+                               (Keys.DASH, Action.DASH_HOLD_TIME),
+                               (Keys.SPELL, Action.SPELL_HOLD_TIME)]:
+            if key_hold[key] >= hold_time / observe_interval and self.has(key):
+                self._remove(key)
 
         if self.has(Keys.UP) and self.has(Keys.DOWN):
             candidates = [Keys.UP, Keys.DOWN]
@@ -141,22 +114,18 @@ class Action:
             self._add(change_key)
 
     def _replace(self):
-        if self.has(Keys.LEFT) and not self.has(Keys.RIGHT):
-            self._remove(Keys.LEFT)
-            self._add(Keys.RIGHT)
-        elif self.has(Keys.RIGHT) and not self.has(Keys.LEFT):
-            self._remove(Keys.RIGHT)
-            self._add(Keys.LEFT)
-
-        if self.has(Keys.UP) and not self.has(Keys.DOWN):
-            self._remove(Keys.UP)
-            self._add(Keys.DOWN)
-        elif self.has(Keys.DOWN) and not self.has(Keys.UP):
-            self._remove(Keys.DOWN)
-            self._add(Keys.UP)
+        for keya, keyb in [(Keys.LEFT, Keys.RIGHT), (Keys.UP, Keys.DOWN)]:
+            if self.has(keya) and not self.has(keyb):
+                self._remove(keya)
+                self._add(keyb)
+            elif self.has(keyb) and not self.has(keya):
+                self._remove(keyb)
+                self._add(keya)
 
     @staticmethod
     def check_key_hold_too_long(key_hold, observe_interval):
+        observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
+
         if key_hold[Keys.JUMP] > Action.JUMP_HOLD_TIME / observe_interval:
             return True
         if key_hold[Keys.DASH] > Action.DASH_HOLD_TIME / observe_interval:
@@ -175,7 +144,6 @@ class BasicAction:
     ATTACK = Action(2 ** Keys.ATTACK)
     DASH = Action(2 ** Keys.DASH)
     SPELL = Action(2 ** Keys.SPELL)
-    SDASH = Action(2 ** Keys.SDASH)
 
 class HKEnv():
     WINDOW_TITLE = "Hollow Knight"
@@ -194,7 +162,7 @@ class HKEnv():
     LOSE_REWARD = -10
     KEY_CONFLICT_REWARD = -1
     KEY_HOLD_REWARD = -1
-    NOTHING_HAPPEN_REWARD = -0.01
+    NOTHING_HAPPEN_REWARD = -0.02
 
     def __init__(self, observe_size, observe_interval, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
@@ -203,7 +171,8 @@ class HKEnv():
         self.observe_interval = observe_interval
         self.device = device
 
-        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.01, high=1, low=0.5)
+        # may extract to class attribute
+        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.015, high=1, low=0.1)
         self.character_remain_weight_counter = Counter(init=-2, increase=0.01, high=-1, low=-2)
         self._reset_env()
 
@@ -241,16 +210,12 @@ class HKEnv():
         return observe, enemy_remain, character_remain
 
     def _prepare(self):
-        while not self.monitor.find(self.MENU_REGION, "locator\menu_badge.png"):
-            stop = False
+        while not (stop := self.monitor.find(self.MENU_REGION, "locator\menu_badge.png")):
             while not self.monitor.is_active():
-                if not stop:
-                    print(f"stop", end='\r')
-                    stop = True
+                stop = True
                 time.sleep(10)
             if stop:
                 self.monitor.activate_move_to_desired()
-                del stop
 
             self.keyboard.execute(BasicAction.UP)
             time.sleep(0.2)
@@ -299,7 +264,7 @@ class HKEnv():
         del win, lose
         return observe, condition, reward, done, enemy_remain
 
-    def for_warmup(self):
+    def warmup(self):
         observe, enemy_remain, character_remain = self.observe()
         condition = torch.clone(self.key_hold).to(self.device)
         return observe, condition
@@ -308,7 +273,7 @@ class HKEnv():
         self._prepare()
         time.sleep(3)
         self._reset_env()
-        return self.for_warmup()
+        return self.warmup()
 
     def _calculate_reward(self, enemy_remain, character_remain, action):
         win = (enemy_remain == 0)
@@ -318,16 +283,13 @@ class HKEnv():
         if win:
             done_reward = self.WIN_REWARD * (character_remain + 1)
         elif lose:
-            done_reward = self.LOSE_REWARD * (enemy_remain / self.ENEMY_FULL_HP + 1)
+            done_reward = self.LOSE_REWARD * (enemy_remain * 9 / self.ENEMY_FULL_HP + 1)
 
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (self.prev_character_remain - character_remain) * self.character_remain_weight_counter.val
         key_conflict_reward = action.conflict_num * self.KEY_CONFLICT_REWARD
         key_hold_reward = 0 if not Action.check_key_hold_too_long(self.key_hold, self.observe_interval) else self.KEY_HOLD_REWARD
-
-        nothing_happen_reward = 0
-        if self.prev_character_remain == character_remain and self.prev_enemy_remain == enemy_remain:
-            nothing_happen_reward = self.NOTHING_HAPPEN_REWARD
+        nothing_happen_reward = 0 if enemy_hp_reward or character_hp_reward else self.NOTHING_HAPPEN_REWARD
 
         reward = done_reward + enemy_hp_reward + character_hp_reward
         reward = reward + key_conflict_reward + key_hold_reward + nothing_happen_reward

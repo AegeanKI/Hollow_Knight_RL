@@ -1,10 +1,7 @@
-# import random
 import os
-import itertools
 import torch
 import numpy as np
 from collections import deque
-from collections.abc import Iterable
 
 from pc import FileAdmin, Logger
 
@@ -72,12 +69,24 @@ class Memory():
         with open(f"{name}_count", 'r') as f:
             self.count = int(f.readline())
 
+    def random_sample(self, n_frames):
+        count_done = 1
+        idx = None
+        n_frames_data = None
+        while count_done > 0:
+            idx = torch.randint(self.count - n_frames, (1,))[0]
+            n_frames_data = self[idx:idx + n_frames]
+            # magic number # (state, condition, action_idx, reward, done, next_state, next_condition)
+            count_done = n_frames_data[4].sum()
+
+        return [data.to(self.device) for data in n_frames_data]
+
 def unpackbits(x, num_bits):
     if np.issubdtype(x.dtype, np.floating):
         raise ValueError("numpy data type needs to be int-like")
     xshape = list(x.shape)
     x = x.reshape([-1, 1])
-    mask = 2**np.arange(num_bits, dtype=x.dtype).reshape([1, num_bits])
+    mask = 2 ** np.arange(num_bits, dtype=x.dtype).reshape([1, num_bits])
     res = (x & mask).astype(bool).astype(int).reshape(xshape + [num_bits])
 
     del xshape, x, mask

@@ -3,16 +3,13 @@ import time
 
 import torch
 import torch.nn as nn
-import numpy as np
-from collections import deque
 
 from pc import FileAdmin, Logger
 from hkenv import Action
 from utils import Memory
 from network import ResNetLSTM
 
-class DQN(nn.Module):
-
+class DRQN(nn.Module):
     def __init__(self, state_size, condition_size, n_frames,
                  out_classes, lr, total_steps, epsilon, gamma, memory_capacity, 
                  target_replace_iter, net_dir, memory_dir, device):
@@ -51,7 +48,7 @@ class DQN(nn.Module):
         if not os.path.exists(self.memory_dir):
             os.makedirs(self.memory_dir)
 
-        self.lr = lr
+        # self.lr = lr
         self.epsilon = epsilon
         self.gamma = gamma
         self.device = device
@@ -60,9 +57,9 @@ class DQN(nn.Module):
         fake_state = torch.rand(self.state_size).to(self.device)
         fake_condition = torch.rand(self.condition_size).to(self.device)
 
-        action = self.choose_action(fake_state, fake_condition, True)
+        action = self.choose_action(fake_state, fake_condition, train=False)
 
-        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)) # n_frame
+        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)) # n_frames
         q_next = self.target_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)).detach()
 
         loss = self.loss_func(q_eval, q_eval)
@@ -73,8 +70,8 @@ class DQN(nn.Module):
         del fake_state, fake_condition
         del q_eval, q_next, loss
 
-    def choose_action(self, state, condition, evaluate=False):
-        if torch.rand(1) < self.epsilon and not evaluate:
+    def choose_action(self, state, condition, train=False):
+        if torch.rand(1) < self.epsilon and train:
             actions_value = torch.rand(self.out_classes)
         else:
             actions_value = self.eval_net(state.unsqueeze(0), condition.unsqueeze(0))
@@ -84,33 +81,23 @@ class DQN(nn.Module):
     def store_episode_experiences(self, experiences):
         self.memory.extend(experiences)
 
-    def random_sample_n_frames_experiences(self):
-        count_done = 1
-        idx = None
-        n_frame_memory_data = None
-        while count_done > 0:
-            idx = torch.randint(len(self.memory) - self.n_frames + 1, (1,))[0]
-            n_frame_memory_data = self.memory[idx:idx + self.n_frames]
-            count_done = n_frame_memory_data[4].sum()
-
-        return [data.to(self.device) for data in n_frame_memory_data]
-
     @property
     def can_learn(self):
-        # return len(self.memory) >= self.memory.maxlen / 4
         return len(self.memory) == self.memory.maxlen
 
     def learn(self, times=1):
         for i_learn in range(times):
-            # print(f"learning {i_learn + 1} / {times}", end='\r')
-            (n_frame_state, n_frame_condition,
-             n_frame_action_idx, n_frame_reward, n_frame_done,
-             n_frame_next_state, n_frame_next_condition) = self.random_sample_n_frames_experiences()
+            n_frames_experiences = self.memory.random_sample(n_frames)
+            n_frames_experiences = [data.to(self.device) for data in n_frames_experiences]
 
-            q_eval = self.eval_net(n_frame_state, n_frame_condition)
-            q_eval = torch.gather(q_eval, dim=1, index=n_frame_action_idx.long())
-            q_next = self.target_net(n_frame_next_state, n_frame_next_condition).detach()
-            q_target = n_frame_reward + self.gamma * q_next.max(dim=1)[0].view(-1, 1)
+            (n_frames_state, n_frames_condition,
+             n_frames_action_idx, n_frames_reward, n_frames_done,
+             n_frames_next_state, n_frames_next_condition) = n_frames_experiences
+
+            q_eval = self.eval_net(n_frames_state, n_frames_condition)
+            q_eval = torch.gather(q_eval, dim=1, index=n_frames_action_idx.long())
+            q_next = self.target_net(n_frames_next_state, n_frames_next_condition).detach()
+            q_target = n_frames_reward + self.gamma * q_next.max(dim=1)[0].view(-1, 1) * (1 - n_frames_done)
             loss = self.loss_func(q_eval, q_target)
 
             self.optimizer.zero_grad()
@@ -123,12 +110,10 @@ class DQN(nn.Module):
                 print(f"copy target from eval")
                 self.target_net.load_state_dict(self.eval_net.state_dict())
 
-            del n_frame_state, n_frame_condition
-            del n_frame_action_idx, n_frame_reward
-            del n_frame_next_state, n_frame_next_condition
+            del n_frames_state, n_frames_condition
+            del n_frames_action_idx, n_frames_reward, n_frames_done
+            del n_frames_next_state, n_frames_next_condition
             del q_eval, q_next, q_target, loss
-        Logger.clear_line()
-        print(f"learning completed")
 
     def save(self, name):
         print(f"saving net", end='\r')
