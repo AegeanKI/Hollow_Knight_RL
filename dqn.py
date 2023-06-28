@@ -6,37 +6,30 @@ import torch.nn as nn
 import numpy as np
 from collections import deque
 
-from pc import FileAdmin
+from pc import FileAdmin, Logger
 from hkenv import Action
 from utils import Memory
-from network import resnet18
+from network import ResNetLSTM
 
 class DQN(nn.Module):
 
-    def __init__(self, state_size, condition_size, status_size, in_channels,
+    def __init__(self, state_size, condition_size, n_frames,
                  out_classes, lr, total_steps, epsilon, gamma, memory_capacity, 
                  target_replace_iter, net_dir, memory_dir, device):
         super().__init__()
 
         self.state_size = state_size
         self.condition_size = condition_size
-        self.status_size = status_size
-
-        flatten_condition_size = torch.prod(torch.Tensor(condition_size).to(torch.int64))
-        flatten_state_size = torch.prod(torch.Tensor(state_size).to(torch.int64))
-        flatten_status_size = torch.prod(torch.Tensor(status_size).to(torch.int64))
+        self.n_frames = n_frames
 
         self.out_classes = out_classes
-        self.eval_net = resnet18(in_channels=in_channels,
-                                 out_classes=out_classes,
-                                 in_condition_size=flatten_condition_size,
-                                 in_status_size=flatten_status_size).to(device)
-        self.target_net = resnet18(in_channels=in_channels,
-                                   out_classes=out_classes,
-                                   in_condition_size=flatten_condition_size,
-                                   in_status_size=flatten_status_size).to(device)
+        self.eval_net = ResNetLSTM(out_classes=out_classes,
+                                   in_condition_size=self.condition_size).to(device)
+        self.target_net = ResNetLSTM(out_classes=out_classes,
+                                     in_condition_size=self.condition_size).to(device)
 
-        self.memory = Memory(memory_capacity)
+        self.memory = Memory(memory_capacity, (state_size, (condition_size,),
+                                               (1,), (1,), (1,), state_size, (condition_size,)))
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
@@ -66,87 +59,58 @@ class DQN(nn.Module):
     def warmup(self):
         fake_state = torch.rand(self.state_size).to(self.device)
         fake_condition = torch.rand(self.condition_size).to(self.device)
-        fake_status = torch.rand(self.status_size).to(self.device)
 
-        action = self.choose_action(fake_state, fake_condition, fake_status, True)
+        action = self.choose_action(fake_state, fake_condition, True)
 
-        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition, fake_status)
-        q_next = self.target_net(fake_state.unsqueeze(0), fake_condition, fake_status).detach()
+        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)) # n_frame
+        q_next = self.target_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)).detach()
+
         loss = self.loss_func(q_eval, q_eval)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        del fake_state, fake_condition, fake_status
+        del fake_state, fake_condition
         del q_eval, q_next, loss
 
-    def choose_action(self, state, condition, status, evaluate=False):
+    def choose_action(self, state, condition, evaluate=False):
         if torch.rand(1) < self.epsilon and not evaluate:
             actions_value = torch.rand(self.out_classes)
         else:
-            actions_value = self.eval_net(state.unsqueeze(0), condition, status)
+            actions_value = self.eval_net(state.unsqueeze(0), condition.unsqueeze(0))
         action_idx = torch.argmax(actions_value)
         return Action(action_idx).to(self.device)
 
-    def convert_to_init(self, elements_list):
-        res = []
-        for elements in elements_list:
-            res.append(torch.stack(elements).to(self.device))
-
-        if len(elements_list) == 1:
-            return res[0]
-        return res
-
-    def convert_to_next(self, cur_elements_list, new_element_list):
-        res = []
-        for cur_elements, new_element in zip(cur_elements_list, new_element_list):
-            cur_elements = cur_elements.to(self.device)
-            new_element = new_element.to(self.device)
-            res.append(torch.cat((cur_elements, new_element.unsqueeze(0)))[1:])
-        return res
-
-    def convert_to_experience(self, *experience):
-        res = []
-        for e in experience:
-            res.append(e.cpu())
-        return res
-
-    def store_experiences(self, experiences):
+    def store_episode_experiences(self, experiences):
         self.memory.extend(experiences)
 
-    def random_sample_experience(self):
-        idx = torch.randint(len(self.memory), (1,))[0]
-        memory_data = self.memory[idx]
+    def random_sample_n_frames_experiences(self):
+        count_done = 1
+        idx = None
+        n_frame_memory_data = None
+        while count_done > 0:
+            idx = torch.randint(len(self.memory) - self.n_frames + 1, (1,))[0]
+            n_frame_memory_data = self.memory[idx:idx + self.n_frames]
+            count_done = n_frame_memory_data[4].sum()
 
-        state = memory_data[0].to(self.device)
-        condition = memory_data[1].to(torch.int64).to(self.device)
-        status = memory_data[2].to(self.device)
-        action_idx = memory_data[3].to(torch.int64).to(self.device)
-        action_keys = memory_data[4].to(torch.int64).to(self.device)
-        reward = memory_data[5].to(self.device)
-        next_state = memory_data[6].to(self.device)
-        next_condition = memory_data[7].to(torch.int64).to(self.device)
-        next_status = memory_data[8].to(self.device)
-
-        del idx, memory_data
-        return (state, condition, status,
-                action_idx, action_keys, reward,
-                next_state, next_condition, next_status)
+        return [data.to(self.device) for data in n_frame_memory_data]
 
     @property
     def can_learn(self):
         # return len(self.memory) >= self.memory.maxlen / 4
         return len(self.memory) == self.memory.maxlen
 
-    def learn(self, batch_learn=1):
-        for i_learn in range(batch_learn):
-            (state, condition, status,
-             action_idx, action_keys, reward,
-             next_state, next_condition, next_status) = self.random_sample_experience()
+    def learn(self, times=1):
+        for i_learn in range(times):
+            # print(f"learning {i_learn + 1} / {times}", end='\r')
+            (n_frame_state, n_frame_condition,
+             n_frame_action_idx, n_frame_reward, n_frame_done,
+             n_frame_next_state, n_frame_next_condition) = self.random_sample_n_frames_experiences()
 
-            q_eval = self.eval_net(state.unsqueeze(0), condition, status)[0, action_idx]
-            q_next = self.target_net(next_state.unsqueeze(0), next_condition, next_status).detach()
-            q_target = reward + self.gamma * q_next.max()
+            q_eval = self.eval_net(n_frame_state, n_frame_condition)
+            q_eval = torch.gather(q_eval, dim=1, index=n_frame_action_idx.long())
+            q_next = self.target_net(n_frame_next_state, n_frame_next_condition).detach()
+            q_target = n_frame_reward + self.gamma * q_next.max(dim=1)[0].view(-1, 1)
             loss = self.loss_func(q_eval, q_target)
 
             self.optimizer.zero_grad()
@@ -159,10 +123,12 @@ class DQN(nn.Module):
                 print(f"copy target from eval")
                 self.target_net.load_state_dict(self.eval_net.state_dict())
 
-            del state, condition, status
-            del action_idx, action_keys, reward
-            del next_state, next_condition, next_status
+            del n_frame_state, n_frame_condition
+            del n_frame_action_idx, n_frame_reward
+            del n_frame_next_state, n_frame_next_condition
             del q_eval, q_next, q_target, loss
+        Logger.clear_line()
+        print(f"learning completed")
 
     def save(self, name):
         print(f"saving net", end='\r')

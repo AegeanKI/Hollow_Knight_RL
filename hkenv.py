@@ -75,10 +75,12 @@ class Action:
     def mutate(self, key_hold, observe_interval):
         if torch.rand(1) < 0.9:
             self._remove_conflict()
-        if torch.rand(1) < 0.1:
+        if torch.rand(1) < 0.2:
             self._simplify(key_hold, observe_interval)
-        if torch.rand(1) < 0.1:
+        if torch.rand(1) < 0.2:
             self._complicate(key_hold, observe_interval)
+        if torch.rand(1) < 0.2:
+            self._replace()
 
     def _remove_conflict(self):
         if self.has(Keys.LEFT) and self.has(Keys.RIGHT):
@@ -138,6 +140,21 @@ class Action:
             change_key = candidates[torch.randint(len(candidates), (1,))]
             self._add(change_key)
 
+    def _replace(self):
+        if self.has(Keys.LEFT) and not self.has(Keys.RIGHT):
+            self._remove(Keys.LEFT)
+            self._add(Keys.RIGHT)
+        elif self.has(Keys.RIGHT) and not self.has(Keys.LEFT):
+            self._remove(Keys.RIGHT)
+            self._add(Keys.LEFT)
+
+        if self.has(Keys.UP) and not self.has(Keys.DOWN):
+            self._remove(Keys.UP)
+            self._add(Keys.DOWN)
+        elif self.has(Keys.DOWN) and not self.has(Keys.UP):
+            self._remove(Keys.DOWN)
+            self._add(Keys.UP)
+
     @staticmethod
     def check_key_hold_too_long(key_hold, observe_interval):
         if key_hold[Keys.JUMP] > Action.JUMP_HOLD_TIME / observe_interval:
@@ -175,23 +192,20 @@ class HKEnv():
 
     WIN_REWARD = 10
     LOSE_REWARD = -10
-    KEY_CONFLICT_REWARD = -10
-    KEY_HOLD_REWARD = -10
+    KEY_CONFLICT_REWARD = -1
+    KEY_HOLD_REWARD = -1
     NOTHING_HAPPEN_REWARD = -0.01
 
-    def __init__(self, observe_size, observe_interval, info_size, device):
+    def __init__(self, observe_size, observe_interval, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
         self.keyboard = Keyboard(Action.KEYS_MAP)
         self.observe_size = observe_size
         self.observe_interval = observe_interval
-        self.info_size = info_size
         self.device = device
 
         self.enemy_remain_weight_counter = Counter(init=1, increase=-0.01, high=1, low=0.5)
         self.character_remain_weight_counter = Counter(init=-2, increase=0.01, high=-1, low=-2)
         self._reset_env()
-        self.observe_base = cv2.imread("locator/base_field.png", cv2.IMREAD_GRAYSCALE)
-        self.observe_base = torch.from_numpy(self.observe_base).to(self.device)
 
     def _reset_env(self):
         time.sleep(0.2)
@@ -220,9 +234,8 @@ class HKEnv():
         character_remain = self._get_character_hp(frame)
 
         observe = cv2.resize(frame[self.OBSERVE_SLICE], self.observe_size, interpolation=cv2.INTER_AREA)
-        observe = cv2.cvtColor(observe, cv2.COLOR_RGB2GRAY)
-        observe = torch.from_numpy(observe).to(self.device)
-        observe = observe - self.observe_base
+        observe = cv2.cvtColor(observe, cv2.COLOR_RGB2BGR)
+        observe = torch.from_numpy(observe).float().permute(2, 0, 1).to(self.device)
 
         del frame
         return observe, enemy_remain, character_remain
@@ -263,18 +276,16 @@ class HKEnv():
 
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
-        done = (win or lose)
+        done = torch.tensor(win or lose).to(self.device)
 
         hit = enemy_remain < self.prev_enemy_remain
         beaten = character_remain < self.prev_character_remain
         self._update_key_hold(action, beaten)
+        condition = torch.clone(self.key_hold).to(self.device)
 
         reward = self._calculate_reward(enemy_remain, character_remain, action)
         self.enemy_remain_weight_counter.step()
         self.character_remain_weight_counter.step()
-
-        info = torch.zeros(self.info_size).to(self.device)
-        info[:len(Keys)] = self.key_hold
 
         if hit:
             self.enemy_remain_weight_counter.reset()
@@ -286,30 +297,18 @@ class HKEnv():
 
         del character_remain
         del win, lose
-        return observe, info, reward, done, enemy_remain
+        return observe, condition, reward, done, enemy_remain
 
-    def reset(self, n_frames):
+    def for_warmup(self):
+        observe, enemy_remain, character_remain = self.observe()
+        condition = torch.clone(self.key_hold).to(self.device)
+        return observe, condition
+
+    def reset(self):
         self._prepare()
-        time.sleep(4)
+        time.sleep(3)
         self._reset_env()
-        return self.init_observe(n_frames)
-
-    def init_observe(self, n_frames):
-        observe_list, action_list, info_list = [], [], []
-        for i in range(n_frames):
-            observe, enemy_remain, character_remain = self.observe()
-            action = BasicAction.NULL
-            info = torch.zeros(self.info_size)
-
-            observe_list.append(observe.to(self.device))
-            action_list.append(action.keys.to(self.device))
-            info_list.append(info.to(self.device))
-
-            # observe_cpu_numpy = observe.cpu().numpy()
-            # cv2.imwrite(f"images/obs{i}.png", observe_cpu_numpy)
-
-        return observe_list, action_list, info_list
-
+        return self.for_warmup()
 
     def _calculate_reward(self, enemy_remain, character_remain, action):
         win = (enemy_remain == 0)
@@ -319,7 +318,7 @@ class HKEnv():
         if win:
             done_reward = self.WIN_REWARD * (character_remain + 1)
         elif lose:
-            done_reward = self.LOSE_REWARD
+            done_reward = self.LOSE_REWARD * (enemy_remain / self.ENEMY_FULL_HP + 1)
 
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (self.prev_character_remain - character_remain) * self.character_remain_weight_counter.val
