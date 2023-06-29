@@ -79,7 +79,7 @@ class Action:
         observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
 
         if (not self.has(Keys.JUMP) and key_hold[Keys.JUMP] > 0 and
-            key_hold[Keys.JUMP] < Action.JUMP_HOLD_TIME / observe_interval):
+            key_hold[Keys.JUMP] + 1 <= Action.JUMP_HOLD_TIME / observe_interval):
             self._add(Keys.JUMP)
 
         if (not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and
@@ -144,11 +144,14 @@ class Action:
     def suitable_release(self, key_hold, observe_interval):
         observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
 
-        if not self.has(Keys.JUMP) and key_hold[Keys.JUMP] + 1 > Action.JUMP_HOLD_TIME / observe_interval:
+        if (not self.has(Keys.JUMP) and key_hold[Keys.JUMP] > 0 and
+            key_hold[Keys.JUMP] <= Action.JUMP_HOLD_TIME / observe_interval):
             return True
-        if not self.has(Keys.DASH) and key_hold[Keys.DASH] + 1 > Action.DASH_HOLD_TIME / observe_interval:
+        if (not self.has(Keys.DASH) and key_hold[Keys.DASH] > 0 and
+            key_hold[Keys.DASH] <= Action.DASH_HOLD_TIME / observe_interval):
             return True
-        if not self.has(Keys.SPELL) and key_hold[Keys.SPELL] + 1 > Action.SPELL_HOLD_TIME / observe_interval:
+        if (not self.has(Keys.SPELL) and  key_hold[Keys.SPELL] > 0 and
+            key_hold[Keys.SPELL] <= Action.SPELL_HOLD_TIME / observe_interval):
             return True
         return False
 
