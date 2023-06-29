@@ -130,15 +130,25 @@ class Action:
                 self._remove(keyb)
                 self._add(keya)
 
-    @staticmethod
-    def check_key_hold_too_long(key_hold, observe_interval):
+    def unsuitable_hold(self, key_hold, observe_interval):
         observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
 
-        if key_hold[Keys.JUMP] > Action.JUMP_HOLD_TIME / observe_interval:
+        if self.has(Keys.JUMP) and key_hold[Keys.JUMP] + 1 > Action.JUMP_HOLD_TIME / observe_interval:
             return True
-        if key_hold[Keys.DASH] > Action.DASH_HOLD_TIME / observe_interval:
+        if self.has(Keys.DASH) and key_hold[Keys.DASH] + 1 > Action.DASH_HOLD_TIME / observe_interval:
             return True
-        if key_hold[Keys.SPELL] > Action.SPELL_HOLD_TIME / observe_interval:
+        if self.has(Keys.SPELL) and key_hold[Keys.SPELL] + 1 > Action.SPELL_HOLD_TIME / observe_interval:
+            return True
+        return False
+
+    def suitable_release(self, key_hold, observe_interval):
+        observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
+
+        if not self.has(Keys.JUMP) and key_hold[Keys.JUMP] + 1 > Action.JUMP_HOLD_TIME / observe_interval:
+            return True
+        if not self.has(Keys.DASH) and key_hold[Keys.DASH] + 1 > Action.DASH_HOLD_TIME / observe_interval:
+            return True
+        if not self.has(Keys.SPELL) and key_hold[Keys.SPELL] + 1 > Action.SPELL_HOLD_TIME / observe_interval:
             return True
         return False
 
@@ -171,10 +181,11 @@ class HKEnv():
     OBSERVE_SLICE = np.s_[31:648, 47:1232]
 
     WIN_REWARD = 10
-    LOSE_REWARD = -10
-    KEY_CONFLICT_REWARD = -0.1
-    KEY_HOLD_REWARD = -0.1
-    NOTHING_HAPPEN_REWARD = -0.01
+    LOSE_PENALTY = -10
+    KEY_CONFLICT_PENALTY = -0.1
+    KEY_HOLD_PENALTY = -0.1
+    KEY_RELEASE_REWARD = 0.1
+    NOTHING_HAPPEN_PENALTY = -0.01
 
     def __init__(self, observe_size, observe_interval, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
@@ -204,7 +215,7 @@ class HKEnv():
         self.prev_enemy_hp_reward = 0
         self.delay_enemy_hp_reward_counter.reset()
 
-        self.rewards = [0] * 7
+        self.rewards = [0] * 8
         self.hits = []
         self.beatens = []
         self.delays = []
@@ -230,13 +241,17 @@ class HKEnv():
             print(f"{step = }, {factor = :.3f}, {quantity = :.3f}")
 
         Logger.indent(indent)
+        print(f"rewards:")
+        Logger.indent(indent + 4)
         print(f"done: {Fore.YELLOW}{self.rewards[0]:.3f}{Fore.RESET}", end='')
         print(f", enemy_hp: {Fore.YELLOW}{self.rewards[1]:.3f}{Fore.RESET}", end='')
         print(f", delay: {Fore.YELLOW}{self.rewards[6]:.3f}{Fore.RESET}", end='')
         print(f", character_hp: {Fore.YELLOW}{self.rewards[2]:.3f}{Fore.RESET}", end='')
-        print(f", conflict: {Fore.YELLOW}{self.rewards[3]:.1f}{Fore.RESET}", end='')
+        print(f", nothing: {Fore.YELLOW}{self.rewards[5]:.2f}{Fore.RESET}")
+        Logger.indent(indent + 4)
+        print(f"conflict: {Fore.YELLOW}{self.rewards[3]:.1f}{Fore.RESET}", end='')
         print(f", hold: {Fore.YELLOW}{self.rewards[4]:.1f}{Fore.RESET}", end='')
-        print(f", nothing: {Fore.YELLOW}{self.rewards[5]:.2f}{Fore.RESET}", end='')
+        print(f", release: {Fore.YELLOW}{self.rewards[7]:.2f}{Fore.RESET}", end='')
         print("")
 
         # Logger.indent(indent)
@@ -302,6 +317,8 @@ class HKEnv():
         self.keyboard.execute(action)
         observe, enemy_remain, character_remain = self.observe()
 
+        reward, affect = self._calculate_reward(enemy_remain, character_remain, action)
+
         win = (enemy_remain == 0)
         lose = (character_remain == 0)
         done = torch.tensor(win or lose).to(self.device)
@@ -310,8 +327,6 @@ class HKEnv():
         beaten = character_remain < self.prev_character_remain
         self._update_key_hold(action, beaten)
         condition = torch.clone(self.key_hold).to(self.device)
-
-        reward, affect = self._calculate_reward(enemy_remain, character_remain, action)
 
         info = (enemy_remain, affect, win)
 
@@ -340,17 +355,21 @@ class HKEnv():
         if win:
             done_reward = self.WIN_REWARD * (character_remain + 1)
         elif lose:
-            done_reward = self.LOSE_REWARD * (enemy_remain * 9 / self.ENEMY_FULL_HP + 1)
+            done_reward = self.LOSE_PENALTY * (enemy_remain * 9 / self.ENEMY_FULL_HP + 1)
 
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (self.prev_character_remain - character_remain) * self.character_remain_weight_counter.val
-        key_conflict_reward = action.conflict_num * self.KEY_CONFLICT_REWARD
+        key_conflict_reward = action.conflict_num * self.KEY_CONFLICT_PENALTY
 
-        key_hold_reward = self.KEY_HOLD_REWARD
-        if not Action.check_key_hold_too_long(self.key_hold, self.observe_interval):
+        key_hold_reward = self.KEY_HOLD_PENALTY
+        if not action.unsuitable_hold(self.key_hold, self.observe_interval):
             key_hold_reward = 0
 
-        nothing_happen_reward = self.NOTHING_HAPPEN_REWARD
+        key_release_reward = self.KEY_RELEASE_REWARD
+        if not action.suitable_release(self.key_hold, self.observe_interval):
+            key_release_reward = 0
+
+        nothing_happen_reward = self.NOTHING_HAPPEN_PENALTY
         if enemy_hp_reward or character_hp_reward:
             nothing_happen_reward = 0
 
@@ -365,8 +384,8 @@ class HKEnv():
         reward = reward + delay_enemy_hp_reward
 
         affect = abs(done_reward) + abs(enemy_hp_reward) + abs(character_hp_reward)
-        affect = affect + abs(key_conflict_reward) + abs(key_hold_reward) + abs(nothing_happen_reward)
-        affect = affect + abs(delay_enemy_hp_reward)
+        affect = affect + abs(key_conflict_reward) + abs(key_hold_reward) + abs(key_release_reward)
+        affect = affect + abs(nothing_happen_reward) + abs(delay_enemy_hp_reward)
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }", end='')
         # print(f", {key_conflict_reward = }, {key_hold_reward = }, {nothing_happen_reward = }, {reward = }")
 
@@ -377,6 +396,7 @@ class HKEnv():
         self.rewards[4] += key_hold_reward
         self.rewards[5] += nothing_happen_reward
         self.rewards[6] += delay_enemy_hp_reward
+        self.rewards[7] += key_release_reward
 
         self.affects += affect
 

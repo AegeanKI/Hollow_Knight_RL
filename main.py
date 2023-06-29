@@ -74,6 +74,38 @@ def interact(env, drqn, i_episode, train=True, indent=0):
 
     return [torch.stack(list(deques)) for deques in episode_experiences] if train else None
 
+def evaluate(env, drqn, n_eval=2):
+    Logger.indent(4)
+    print("evaluating:")
+    for i_evaluate in range(n_eval):
+        interact(env, drqn, i_evaluate, train=False, indent=4)
+
+def learn(env, drqn, n_episodes):
+    start_learning = False
+    for i_train in range(n_episodes):
+        torch.cuda.empty_cache()
+
+        episode_experiences = interact(env, drqn, i_train, train=True)
+        drqn.store_episode_experiences(episode_experiences)
+
+        if not drqn.can_learn:
+            print(f"not enough memory, {len(drqn.memory)} / {memory_capacity}")
+        elif not start_learning:
+            start_learning = True
+            print(f"enough memory, start learning")
+
+        if drqn.can_learn:
+            drqn.learn(times=episode_learn_times)
+
+        if (i_train % n_episodes_save) == n_episodes_save - 1:
+            drqn.save(f"drqn_training")
+
+            if drqn.can_learn:
+                evaluating(env, drqn, n_eval=2)
+
+    print(f"training completed")
+    drqn.save(f"drqn_completed")
+
 def read_args():
     parser = ArgumentParser()
 
@@ -131,35 +163,8 @@ if __name__ == "__main__":
     # env.test()
 
     if args.evaluate:
-        for i_evaluate in range(2):
-            interact(env, drqn, i_evaluate, train=False, indent=4)
+        evaluate(env, drqn, n_eval=2)
     else:
-        start_learning = False
-        for i_train in range(n_episodes):
-            torch.cuda.empty_cache()
-
-            episode_experiences = interact(env, drqn, i_train, train=True)
-            drqn.store_episode_experiences(episode_experiences)
-
-            if not drqn.can_learn:
-                print(f"not enough memory, {len(drqn.memory)} / {memory_capacity}")
-            elif not start_learning:
-                start_learning = True
-                print(f"enough memory, start learning")
-
-            if drqn.can_learn:
-                drqn.learn(times=episode_learn_times)
-
-            if (i_train % n_episodes_save) == n_episodes_save - 1:
-                drqn.save(f"drqn_training")
-
-                if drqn.can_learn:
-                    Logger.indent(4)
-                    print("evaluating:")
-                    for i_evaluate in range(2):
-                        interact(env, drqn, i_evaluate, train=False, indent=4)
-
-        print(f"training completed")
-        drqn.save(f"drqn_completed")
+        learn(env, drqn, n_episodes)
 
     env.close()
