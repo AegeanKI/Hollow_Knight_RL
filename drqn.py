@@ -25,16 +25,17 @@ class DRQN(nn.Module):
         self.target_net = ResNetLSTM(out_classes=out_classes,
                                      in_condition_size=self.condition_size).to(device)
 
-        self.memory = Memory(memory_capacity, (state_size, (condition_size,),
-                                               (1,), (1,), (1,), state_size, (condition_size,)))
+        self.memory = Memory(memory_capacity, (state_size, (condition_size, ),
+                                               (1, ), (1, ), (1, ), (1, ),
+                                               state_size, (condition_size, )))
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
                                                            base_lr=lr/10,
                                                            max_lr=lr,
-                                                           gamma=1.0,
-                                                           step_size_up=total_steps/(2*20),
-                                                           step_size_down=total_steps/(2*20),
+                                                           gamma=0.95,
+                                                           step_size_up=total_steps/(2*40),
+                                                           step_size_down=total_steps/(2*40),
                                                            cycle_momentum=False)
 
         self.loss_func = nn.MSELoss()
@@ -92,7 +93,7 @@ class DRQN(nn.Module):
             n_frames_experiences = [data.to(self.device) for data in n_frames_experiences]
 
             (n_frames_state, n_frames_condition,
-             n_frames_action_idx, n_frames_reward, n_frames_done,
+             n_frames_action_idx, n_frames_reward, n_frames_done, n_frames_affect,
              n_frames_next_state, n_frames_next_condition) = n_frames_experiences
 
             q_eval = self.eval_net(n_frames_state, n_frames_condition)
@@ -115,6 +116,8 @@ class DRQN(nn.Module):
             del n_frames_action_idx, n_frames_reward, n_frames_done
             del n_frames_next_state, n_frames_next_condition
             del q_eval, q_next, q_target, loss
+        Logger.clear_line()
+        print(f"learning completed")
 
     def save(self, name):
         print(f"saving net", end='\r')

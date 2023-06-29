@@ -14,8 +14,8 @@ class ResNetLSTM(nn.Module):
         self.lstm_hidden_size = lstm_hidden_size
         self.lstm = nn.LSTM(512 + in_condition_size, self.lstm_hidden_size, self.lstm_layer)
         self.decoder = nn.Sequential(
-            # nn.Linear(512, 512),
-            # nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
             nn.Linear(512, out_classes)
         )
 

@@ -6,22 +6,28 @@ from collections import deque
 from pc import FileAdmin, Logger
 
 class Counter():
-    def __init__(self, init, increase, high, low):
-        self.init = init
-        self.val = init
-        self.increase = increase
-        self.high = high
-        self.low = low
+    def __init__(self, start, end, fn):
+        self.start = start
+        self.end = end
+        self.fn = fn
+
+        self.val = start
+        self.step_count = 0
+        self.bound = min if end > start else max
 
         self.reset()
 
     def step(self):
-        self.val = self.val + self.increase
-        self.val = min(self.val, self.high)
-        self.val = max(self.val, self.low)
+        self.val = self.fn(self.val)
+        self.val = self.bound(self.val, self.end)
+        self.step_count = self.step_count + 1
 
     def reset(self):
-        self.val = self.init
+        self.val = self.start
+        self.step_count = 0
+
+    def final(self):
+        self.val = self.end
 
 class Memory():
     def __init__(self, maxlen, size_list):
@@ -44,7 +50,7 @@ class Memory():
         return result
 
     def extend(self, vals):
-        assert len(vals) == len(self.buffers), f"memory append error, {len(self.val) = }, {len(self.buffers) = }"
+        assert len(vals) == len(self.buffers), f"memory append error, {len(val) = }, {len(self.buffers) = }"
 
         n = vals[0].shape[0]
         for i in range(len(self.buffers)):
@@ -73,7 +79,7 @@ class Memory():
         count_done = 1
         idx = None
         while count_done:
-            # (state, condition, action_idx, reward, done, next_state, next_condition)
+            # (state, condition, action_idx, reward, done, affect, next_state, next_condition)
             idx = torch.randint(self.count - n_frames + 1, (1,))[0] # idx is first
             count_done = self.buffers[4][idx:idx + n_frames - 1].sum() # last frame can be done
 
@@ -83,9 +89,11 @@ class Memory():
         count_done = 1
         idx = None
         while count_done:
-            #  (state, condition, action_idx, reward, done, next_state, next_condition)
-            weights = self.buffers[3].view(-1).abs() + 1 / self.maxlen
-            idx = torch.multinomial(weights[n_frames - 1:], 1)[0] + n_frames - 1 # idx is last
+            #  (state, condition, action_idx, reward, done, affect, next_state, next_condition)
+            weights = self.buffers[5].view(-1).abs() + 1 / self.maxlen
+            candidates = torch.multinomial(weights[n_frames - 1:], int(self.maxlen / 100))
+            candidates = candidates + n_frames - 1 # idx is last
+            idx = candidates[torch.randint(len(candidates), (1,))][0]
             count_done = self.buffers[4][idx + 1 - n_frames:idx + 1 - 1].sum() # last frame can be done
 
         return self[idx + 1 - n_frames:idx + 1]

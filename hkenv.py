@@ -5,8 +5,9 @@ import cv2
 import torch
 import numpy as np
 
-from pc import Monitor, Keyboard
+from pc import Monitor, Keyboard, Logger
 from utils import Counter, unpackbits
+from colorama import Fore
 
 class Keys(enum.IntEnum):
     UP = 0
@@ -81,24 +82,26 @@ class Action:
             key_hold[Keys.JUMP] < Action.JUMP_HOLD_TIME / observe_interval):
             self._add(Keys.JUMP)
 
-        if not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and not self.has(Keys.DOWN):
-            if self.has(Keys.SPELL):
-                candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
-                change_key = candidates[torch.randint(len(candidates), (1,))]
-                self._add(change_key)
-            if key_hold[Keys.ATTACK] > Action.ATTACK_HOLD_TIME / observe_interval and not self.has(Keys.ATTACK):
-                candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
-                change_key = candidates[torch.randint(len(candidates), (1,))]
-                self._add(change_key)
+        if (not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and
+            not self.has(Keys.DOWN) and self.has(Keys.SPELL)):
+            candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
+            change_key = candidates[torch.randint(len(candidates), (1,))]
+            self._add(change_key)
 
-                if (change_key == Keys.LEFT or change_key == Keys.RIGHT) and torch.rand(1) < 0.5:
-                    self._add(Keys.DASH)
+        if (not self.has(Keys.UP) and not self.has(Keys.DOWN) and not self.has(Keys.LEFT) and
+            not self.has(Keys.DOWN) and not self.has(Keys.ATTACK) and
+            key_hold[Keys.ATTACK] > Action.ATTACK_HOLD_TIME / observe_interval):
+            candidates = [Keys.UP, Keys.DOWN, Keys.LEFT, Keys.RIGHT]
+            change_key = candidates[torch.randint(len(candidates), (1,))]
+            self._add(change_key)
 
-        if not self.has(Keys.LEFT) and not self.has(Keys.RIGHT):
-            if self.has(Keys.DASH):
-                candidates = [Keys.LEFT, Keys.RIGHT]
-                change_key = candidates[torch.randint(len(candidates), (1,))]
-                self._add(change_key)
+            if (change_key == Keys.LEFT or change_key == Keys.RIGHT) and torch.rand(1) < 0.5:
+                self._add(Keys.DASH)
+
+        if not self.has(Keys.LEFT) and not self.has(Keys.RIGHT) and self.has(Keys.DASH):
+            candidates = [Keys.LEFT, Keys.RIGHT]
+            change_key = candidates[torch.randint(len(candidates), (1,))]
+            self._add(change_key)
 
     def _simplify(self, key_hold, observe_interval):
         observe_interval = observe_interval - Action.OBSERVE_INTERVAL_ERROR
@@ -112,10 +115,11 @@ class Action:
             if key_hold[key] >= hold_time / observe_interval and self.has(key):
                 self._remove(key)
 
-        if self.has(Keys.UP) and self.has(Keys.DOWN):
-            candidates = [Keys.UP, Keys.DOWN]
-            change_key = candidates[torch.randint(len(candidates), (1,))]
-            self._add(change_key)
+        for keya, keyb in [(Keys.LEFT, Keys.RIGHT), (Keys.UP, Keys.DOWN)]:
+            if self.has(keya) and self.has(keyb):
+                candidates = [keya, keyb]
+                change_key = candidates[torch.randint(len(candidates), (1,))]
+                self._remove(change_key)
 
     def _replace(self):
         for keya, keyb in [(Keys.LEFT, Keys.RIGHT), (Keys.UP, Keys.DOWN)]:
@@ -137,6 +141,10 @@ class Action:
         if key_hold[Keys.SPELL] > Action.SPELL_HOLD_TIME / observe_interval:
             return True
         return False
+
+    @property
+    def press_damage_key(self):
+        return self.has(Keys.ATTACK) or self.has(Keys.SPELL)
 
 class BasicAction:
     NULL = Action(0)
@@ -164,9 +172,9 @@ class HKEnv():
 
     WIN_REWARD = 10
     LOSE_REWARD = -10
-    KEY_CONFLICT_REWARD = -1
-    KEY_HOLD_REWARD = -1
-    NOTHING_HAPPEN_REWARD = -0.02
+    KEY_CONFLICT_REWARD = -0.1
+    KEY_HOLD_REWARD = -0.1
+    NOTHING_HAPPEN_REWARD = -0.01
 
     def __init__(self, observe_size, observe_interval, device):
         self.monitor = Monitor(self.WINDOW_TITLE, self.WINDOW_LOCATION, self.WINDOW_SIZE)
@@ -176,8 +184,9 @@ class HKEnv():
         self.device = device
 
         # may extract to class attribute
-        self.enemy_remain_weight_counter = Counter(init=1, increase=-0.015, high=1, low=0.1)
-        self.character_remain_weight_counter = Counter(init=-2, increase=0.01, high=-1, low=-2)
+        self.enemy_remain_weight_counter = Counter(start=1, end=0.1, fn=lambda x: x - 0.015)
+        self.character_remain_weight_counter = Counter(start=-8, end=-4, fn=lambda x: x + 0.04)
+        self.delay_enemy_hp_reward_counter = Counter(start=0.5, end=0, fn=lambda x: x * 1 / 2 - 0.0625)
         self._reset_env()
 
     def _reset_env(self):
@@ -192,6 +201,47 @@ class HKEnv():
         self.key_hold = torch.zeros(len(Keys))
         self.enemy_remain_weight_counter.reset()
         self.character_remain_weight_counter.reset()
+        self.prev_enemy_hp_reward = 0
+        self.delay_enemy_hp_reward_counter.reset()
+
+        self.rewards = [0] * 7
+        self.hits = []
+        self.beatens = []
+        self.delays = []
+        self.affects = 0
+
+    def end(self, indent=0):
+        Logger.indent(indent)
+        print(f"hits:")
+        for step, factor, quantity in self.hits:
+            Logger.indent(indent + 4)
+            print(f"{step = }, {factor = :.3f}, {quantity = }")
+
+        Logger.indent(indent)
+        print(f"beatens:")
+        for step, factor, quantity in self.beatens:
+            Logger.indent(indent + 4)
+            print(f"{step = }, {factor = :.3f}, {quantity = }")
+
+        Logger.indent(indent)
+        print(f"delays:")
+        for step, factor, quantity in self.delays:
+            Logger.indent(indent + 4)
+            print(f"{step = }, {factor = :.3f}, {quantity = :.3f}")
+
+        Logger.indent(indent)
+        print(f"done: {Fore.YELLOW}{self.rewards[0]:.3f}{Fore.RESET}", end='')
+        print(f", enemy_hp: {Fore.YELLOW}{self.rewards[1]:.3f}{Fore.RESET}", end='')
+        print(f", delay: {Fore.YELLOW}{self.rewards[6]:.3f}{Fore.RESET}", end='')
+        print(f", character_hp: {Fore.YELLOW}{self.rewards[2]:.3f}{Fore.RESET}", end='')
+        print(f", conflict: {Fore.YELLOW}{self.rewards[3]:.1f}{Fore.RESET}", end='')
+        print(f", hold: {Fore.YELLOW}{self.rewards[4]:.1f}{Fore.RESET}", end='')
+        print(f", nothing: {Fore.YELLOW}{self.rewards[5]:.2f}{Fore.RESET}", end='')
+        print("")
+
+        # Logger.indent(indent)
+        # print(f"affect = {self.affects}")
+        self._reset_env()
 
     def close(self):
         self._reset_env()
@@ -216,6 +266,7 @@ class HKEnv():
     def _prepare(self):
         while not (stop := self.monitor.find(self.MENU_REGION, "locator\menu_badge.png")):
             while not self.monitor.is_active():
+                print(f"stop", end='\r')
                 stop = True
                 time.sleep(10)
             if stop:
@@ -230,6 +281,14 @@ class HKEnv():
         time.sleep(0.2)
         self.keyboard.execute(BasicAction.NULL)
         time.sleep(0.2)
+
+        blank = False
+        while True:
+            observe, _, _ = self.observe()
+            if observe.sum() > 60000000:
+                blank = True
+            elif observe.sum() < 30000000 and blank:
+                break
 
     def _update_key_hold(self, action, beaten):
         for key in Keys:
@@ -247,26 +306,21 @@ class HKEnv():
         lose = (character_remain == 0)
         done = torch.tensor(win or lose).to(self.device)
 
-        hit = enemy_remain < self.prev_enemy_remain
+        # hit = enemy_remain < self.prev_enemy_remain
         beaten = character_remain < self.prev_character_remain
         self._update_key_hold(action, beaten)
         condition = torch.clone(self.key_hold).to(self.device)
 
-        reward = self._calculate_reward(enemy_remain, character_remain, action)
-        self.enemy_remain_weight_counter.step()
-        self.character_remain_weight_counter.step()
+        reward, affect = self._calculate_reward(enemy_remain, character_remain, action)
 
-        if hit:
-            self.enemy_remain_weight_counter.reset()
-        if beaten:
-            self.character_remain_weight_counter.reset()
+        info = (enemy_remain, affect, win)
 
         self.prev_character_remain = character_remain
         self.prev_enemy_remain = enemy_remain
 
         del character_remain
         del win, lose
-        return observe, condition, reward, done, enemy_remain
+        return observe, condition, reward, done, info
 
     def warmup(self):
         observe, enemy_remain, character_remain = self.observe()
@@ -275,7 +329,6 @@ class HKEnv():
 
     def reset(self):
         self._prepare()
-        time.sleep(3)
         self._reset_env()
         return self.warmup()
 
@@ -292,17 +345,72 @@ class HKEnv():
         enemy_hp_reward = (self.prev_enemy_remain - enemy_remain) * self.enemy_remain_weight_counter.val
         character_hp_reward = (self.prev_character_remain - character_remain) * self.character_remain_weight_counter.val
         key_conflict_reward = action.conflict_num * self.KEY_CONFLICT_REWARD
-        key_hold_reward = 0 if not Action.check_key_hold_too_long(self.key_hold, self.observe_interval) else self.KEY_HOLD_REWARD
-        nothing_happen_reward = 0 if enemy_hp_reward or character_hp_reward else self.NOTHING_HAPPEN_REWARD
+
+        key_hold_reward = self.KEY_HOLD_REWARD
+        if not Action.check_key_hold_too_long(self.key_hold, self.observe_interval):
+            key_hold_reward = 0
+
+        nothing_happen_reward = self.NOTHING_HAPPEN_REWARD
+        if enemy_hp_reward or character_hp_reward:
+            nothing_happen_reward = 0
+
+        delay_enemy_hp_reward = self.prev_enemy_hp_reward * self.delay_enemy_hp_reward_counter.val
+        if action.press_damage_key:
+            delay_enemy_hp_reward = 0
+        if enemy_hp_reward:
+            self.prev_enemy_hp_reward = enemy_hp_reward
 
         reward = done_reward + enemy_hp_reward + character_hp_reward
         reward = reward + key_conflict_reward + key_hold_reward + nothing_happen_reward
+        reward = reward + delay_enemy_hp_reward
+
+        affect = abs(done_reward) + abs(enemy_hp_reward) + abs(character_hp_reward)
+        affect = affect + abs(key_conflict_reward) + abs(key_hold_reward) + abs(nothing_happen_reward)
+        affect = affect + abs(delay_enemy_hp_reward)
         # print(f"{done_reward = }, {enemy_hp_reward = }. {character_hp_reward = }", end='')
         # print(f", {key_conflict_reward = }, {key_hold_reward = }, {nothing_happen_reward = }, {reward = }")
+
+        self.rewards[0] += done_reward
+        self.rewards[1] += enemy_hp_reward
+        self.rewards[2] += character_hp_reward
+        self.rewards[3] += key_conflict_reward
+        self.rewards[4] += key_hold_reward
+        self.rewards[5] += nothing_happen_reward
+        self.rewards[6] += delay_enemy_hp_reward
+
+        self.affects += affect
+
+        if delay_enemy_hp_reward:
+            self.delays.append([self.delay_enemy_hp_reward_counter.step_count,
+                                self.delay_enemy_hp_reward_counter.val,
+                                self.prev_enemy_hp_reward])
+            self.delay_enemy_hp_reward_counter.final()
+        else:
+            self.delay_enemy_hp_reward_counter.step()
+
+        if enemy_hp_reward:
+            self.hits.append([self.enemy_remain_weight_counter.step_count,
+                              self.enemy_remain_weight_counter.val,
+                              self.prev_enemy_remain - enemy_remain])
+            self.enemy_remain_weight_counter.reset()
+            self.delay_enemy_hp_reward_counter.reset()
+        else:
+            self.enemy_remain_weight_counter.step()
+
+        if character_hp_reward:
+            self.beatens.append([self.character_remain_weight_counter.step_count,
+                                 self.character_remain_weight_counter.val,
+                                 self.prev_character_remain - character_remain])
+            self.character_remain_weight_counter.reset()
+            self.delay_enemy_hp_reward_counter.final()
+        else:
+            self.character_remain_weight_counter.step()
+
         del win, lose
         del done_reward, enemy_hp_reward, character_hp_reward
         del key_conflict_reward, key_hold_reward, nothing_happen_reward
-        return torch.tensor(reward, dtype=torch.float32).to(self.device)
+        return (torch.tensor(reward, dtype=torch.float32).to(self.device),
+                torch.tensor(affect, dtype=torch.float32).to(self.device))
 
     def _get_enemy_hp(self, frame):
         bar = frame[self.ENEMY_HP_SLICE]

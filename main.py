@@ -13,6 +13,7 @@ from drqn import DRQN
 from pc import Logger
 from hkenv import Keys, Action, HKEnv
 from collections import deque
+from colorama import init, Fore, Back, Style
 
 def limit_cpu():
     p = psutil.Process()
@@ -24,7 +25,7 @@ def interact(env, drqn, i_episode, train=True, indent=0):
     # action = drqn.choose_action(state, condition, train=False)
     # warmup completed
 
-    episode_experiences = [deque() for _ in range(7)]
+    episode_experiences = [deque() for _ in range(8)]
     t = 0
     rewards = 0
     state, condition = env.reset()
@@ -34,10 +35,13 @@ def interact(env, drqn, i_episode, train=True, indent=0):
         action = drqn.choose_action(state, condition, train=train)
         if train:
             action.mutate(env.key_hold, env.observe_interval)
-        next_state, next_condition, reward, done, enemy_remain = env.step(action)
+        next_state, next_condition, reward, done, info = env.step(action)
+        enemy_remain, affect, win = info
 
         if train:
-            experience = (state, condition, action.idx, reward, done, next_state, next_condition)
+            experience = (state, condition,
+                          action.idx, reward, done, affect,
+                          next_state, next_condition)
             for dq, val in zip(episode_experiences, experience):
                 dq.append(val.unsqueeze(0).cpu() if val.ndim == 0 else val.cpu())
 
@@ -46,16 +50,22 @@ def interact(env, drqn, i_episode, train=True, indent=0):
         state, condition = next_state, next_condition
 
         if done:
-            env.close()
+            Logger.clear_line()
+            env.end(indent=indent)
             Logger.indent(indent=indent)
-            print(f"Episode {i_episode} finished after {t} timesteps", end='')
-            print(f", total rewards {rewards:.3f}, cur_enemy_remain = {enemy_remain}", end='')
+            if win:
+                print(f"Episode {Fore.GREEN}{i_episode} win{Fore.RESET}", end='')
+            else:
+                print(f"Episode {Fore.RED}{i_episode} lose{Fore.RESET}", end='')
+            print(f" after {t} timesteps", end='')
+            print(f", total rewards {Fore.CYAN}{rewards:.3f}{Fore.RESET}", end='')
+            print(f", cur_enemy_remain = {Fore.CYAN}{enemy_remain}{Fore.RESET}", end='')
             print(f", spend time = {time.time() - episode_start_time:.3f}", end='')
-            print(f", ops = {t / (time.time() - episode_start_time):.3f}")
+            print(f", ops = {t / (time.time() - episode_start_time):.3f}\n")
             break
 
         del action
-        del reward, done, enemy_remain
+        del reward, done, affect, enemy_remain
         del next_state, next_condition
 
     del state, condition
@@ -75,6 +85,7 @@ def read_args():
 
 if __name__ == "__main__":
     limit_cpu()
+    init(autoreset=True)
 
     args = read_args()
 
