@@ -5,34 +5,50 @@ from torchvision import models
 
 class ResNetLSTM(nn.Module):
     def __init__(self, out_classes, in_condition_size,
-                 lstm_layer=1, lstm_hidden_size=512):
+                 lstm_layer=2, lstm_hidden_size=512):
         super().__init__()
         self.encoder = models.resnet34(weights='DEFAULT')
         self.encoder = nn.Sequential(*(list(self.encoder.children())[:-1])) # output size: 2048
+        self.encoder_feature_size = 512
 
         self.lstm_layer = lstm_layer
         self.lstm_hidden_size = lstm_hidden_size
-        self.lstm = nn.LSTM(512 + in_condition_size, self.lstm_hidden_size, self.lstm_layer)
-        self.decoder = nn.Sequential(
-            nn.Linear(512, 512),
+        self.lstm = nn.LSTM(self.encoder_feature_size + in_condition_size,
+                            self.lstm_hidden_size, self.lstm_layer)
+
+        self.advantage = nn.Sequential(
+            nn.Linear(self.lstm_hidden_size, self.lstm_hidden_size),
             nn.ReLU(),
-            nn.Linear(512, out_classes)
+            nn.Linear(self.lstm_hidden_size, out_classes)
         )
+
+        self.value = nn.Sequential(
+            nn.Linear(self.lstm_hidden_size, self.lstm_hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.lstm_hidden_size, 1)
+        )
+
+    def init_lstm_hidden(self):
+        self.h = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
+        self.c = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
 
     @property
     def device(self):
         return next(self.parameters()).device
 
     def forward(self, x, condition):
-        out = self.encoder(x)
+        # print(f"{x.shape = }, {condition.shape = }")
+        out = self.encoder(x).detach()
 
-        self.h = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
-        self.c = torch.zeros((self.lstm_layer, self.lstm_hidden_size), dtype=torch.float32).to(self.device)
         out = out.view(out.size(0), out.size(1))
-        out, _ = self.lstm(torch.cat((out, condition), dim=1), (self.h, self.c))
+        # print(f"{torch.cat((out, condition), dim=1).shape = }")
+        out, (self.h, self.c) = self.lstm(torch.cat((out, condition), dim=1), (self.h, self.c))
 
-        out = self.decoder(out)
-        return out
+        advantage = self.advantage(out)
+        value = self.value(out)
+        # print(f"{(value + advantage - advantage.mean()).shape = }")
+
+        return value + advantage - advantage.mean()
 
 
 # class ResNet18(nn.Module):

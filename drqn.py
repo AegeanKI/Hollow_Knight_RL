@@ -31,9 +31,9 @@ class DRQN(nn.Module):
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
-                                                           base_lr=lr/10,
+                                                           base_lr=lr/100,
                                                            max_lr=lr,
-                                                           gamma=0.95,
+                                                           gamma=0.9,
                                                            step_size_up=total_steps/(2*40),
                                                            step_size_down=total_steps/(2*40),
                                                            cycle_momentum=False)
@@ -54,11 +54,18 @@ class DRQN(nn.Module):
         self.gamma = gamma
         self.device = device
 
+    def reset_net(self):
+        self.eval_net.init_lstm_hidden()
+        self.target_net.init_lstm_hidden()
+
     def warmup(self):
+        self.reset_net()
+
         fake_state = torch.rand(self.state_size).to(self.device)
         fake_condition = torch.rand(self.condition_size).to(self.device)
 
-        action = self.choose_action(fake_state, fake_condition, train=False)
+        actions_value = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0))
+        print(f"warmup {actions_value.max().item() = }, {actions_value.min().item() = }")
 
         q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)) # n_frames
         q_next = self.target_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)).detach()
@@ -69,15 +76,18 @@ class DRQN(nn.Module):
         self.optimizer.step()
 
         del fake_state, fake_condition
+        del actions_value
         del q_eval, q_next, loss
 
     def choose_action(self, state, condition, train=False):
+        epsilon = False
         if torch.rand(1) < self.epsilon and train:
             actions_value = torch.rand(self.out_classes)
+            epsilon = True
         else:
             actions_value = self.eval_net(state.unsqueeze(0), condition.unsqueeze(0))
         action_idx = torch.argmax(actions_value)
-        return Action(action_idx).to(self.device)
+        return Action(action_idx).to(self.device), epsilon
 
     def store_episode_experiences(self, experiences):
         self.memory.extend(experiences)
@@ -87,10 +97,11 @@ class DRQN(nn.Module):
         return len(self.memory) == self.memory.maxlen
 
     def learn(self, times=1):
-        for i_learn in range(times):
+        for i_learn, samples in enumerate(self.memory.prioritize_sample(self.n_frames, times)):
             print(f"learning {i_learn + 1} / {times}", end='\r')
-            n_frames_experiences = self.memory.prioritize_random_sample(self.n_frames)
-            n_frames_experiences = [data.to(self.device) for data in n_frames_experiences]
+            n_frames_experiences = [sample.to(self.device) for sample in samples]
+
+            self.reset_net()
 
             (n_frames_state, n_frames_condition,
              n_frames_action_idx, n_frames_reward, n_frames_done, n_frames_affect,
@@ -98,10 +109,15 @@ class DRQN(nn.Module):
 
             q_eval = self.eval_net(n_frames_state, n_frames_condition)
             q_eval = torch.gather(q_eval, dim=1, index=n_frames_action_idx.long())
-            q_next = self.target_net(n_frames_next_state, n_frames_next_condition).detach()
-            q_target = n_frames_reward + self.gamma * q_next.max(dim=1)[0].view(-1, 1) * (1 - n_frames_done)
-            loss = self.loss_func(q_eval, q_target)
 
+            n_frames_next_action_value = self.eval_net(n_frames_next_state, n_frames_next_condition).detach()
+            n_frames_next_action_idx = n_frames_next_action_value.argmax(dim=1)[0].view(-1, 1)
+            q_next = self.target_net(n_frames_next_state, n_frames_next_condition).detach()
+            q_next = torch.gather(q_next, dim=1, index=n_frames_next_action_idx.long())
+
+            q_target = n_frames_reward + self.gamma * q_next * (1 - n_frames_done)
+
+            loss = self.loss_func(q_eval, q_target)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()

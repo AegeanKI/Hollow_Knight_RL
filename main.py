@@ -28,15 +28,27 @@ def interact(env, drqn, i_episode, train=True, indent=0):
     episode_experiences = [deque() for _ in range(8)]
     t = 0
     rewards = 0
+    drqn.reset_net()
     state, condition = env.reset()
     episode_start_time = time.time()
     while True:
         print(f"step {t + 1}", end='\r')
-        action = drqn.choose_action(state, condition, train=train)
+        action, epsilon = drqn.choose_action(state, condition, train=train)
+        Logger.indent(indent)
+        if epsilon:
+            print(f"random {Fore.CYAN}{action}{Fore.RESET}")
+        else:
+            print(f"choose {action}")
         if train:
             action.mutate(env.key_hold, env.observe_interval)
+            if not epsilon and action.mutated:
+                Logger.indent(indent)
+                print(f"-----> {Fore.YELLOW}{action}{Fore.RESET}")
         next_state, next_condition, reward, done, info = env.step(action)
         enemy_remain, affect, win = info
+        assert not torch.isnan(done), f"done is nan, {done = }"
+        assert not torch.isinf(done), f"done is nan, {done = }"
+        assert done == 0 or done == 1, f"done is not 0 and not 1, {done = }"
 
         if train:
             experience = (state, condition,
@@ -64,6 +76,9 @@ def interact(env, drqn, i_episode, train=True, indent=0):
             print(f", ops = {t / (time.time() - episode_start_time):.3f}\n")
             break
 
+        # if t == 20:
+        #     break
+
         del action
         del reward, done, affect, enemy_remain
         del next_state, next_condition
@@ -74,13 +89,13 @@ def interact(env, drqn, i_episode, train=True, indent=0):
 
     return [torch.stack(list(deques)) for deques in episode_experiences] if train else None
 
-def evaluate(env, drqn, n_eval=2):
+def evaluate(env, drqn, n_eval=1):
     Logger.indent(4)
     print("evaluating:")
     for i_evaluate in range(n_eval):
         interact(env, drqn, i_evaluate, train=False, indent=4)
 
-def learn(env, drqn, n_episodes):
+def learn(env, drqn, n_episodes, n_episodes_save):
     start_learning = False
     for i_train in range(n_episodes):
         torch.cuda.empty_cache()
@@ -101,7 +116,7 @@ def learn(env, drqn, n_episodes):
             drqn.save(f"drqn_training")
 
             if drqn.can_learn:
-                evaluating(env, drqn, n_eval=2)
+                evaluate(env, drqn, n_eval=1)
 
     print(f"training completed")
     drqn.save(f"drqn_completed")
@@ -123,18 +138,19 @@ if __name__ == "__main__":
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"{device = }")
+    cudnn.enable = True
     cudnn.benchmark = True
 
-    n_frames = 12
+    n_frames = 50
     w = 384
     h = 216
     memory_capacity = 3000
     target_replace_iter = memory_capacity // 2
     net_dir = "nets"
     memory_dir = "memories"
-    lr = 0.1
+    lr = 1
     epsilon = 0.2
-    gamma = 0.99
+    gamma = 0.9
     n_episodes = 2000
     n_episodes_save = 20
     episode_learn_times = memory_capacity // 4
@@ -159,12 +175,12 @@ if __name__ == "__main__":
                 device=device)
 
     # drqn.save("drqn_training")
-    # drqn.load("drqn_training")
+    drqn.load("drqn_training")
     # env.test()
 
     if args.evaluate:
         evaluate(env, drqn, n_eval=2)
     else:
-        learn(env, drqn, n_episodes)
+        learn(env, drqn, n_episodes, n_episodes_save)
 
     env.close()

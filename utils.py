@@ -75,28 +75,37 @@ class Memory():
         with open(f"{name}_count", 'r') as f:
             self.count = int(f.readline())
 
-    def random_sample(self, n_frames):
-        count_done = 1
-        idx = None
-        while count_done:
-            # (state, condition, action_idx, reward, done, affect, next_state, next_condition)
-            idx = torch.randint(self.count - n_frames + 1, (1,))[0] # idx is first
-            count_done = self.buffers[4][idx:idx + n_frames - 1].sum() # last frame can be done
+    def random_sample(self, n_frames, times):
+        return prioritize_sample(n_frames, times, full_random=True)
 
-        return self[idx:idx + n_frames]
+    def prioritize_sample(self, n_frames, times, full_random=False):
+        assert torch.sum(self.buffers[4] > 1) == 0, f"buffers[4] greater than 1, self.buffers[self.buffers[4] > 1]"
+        can_be_last = torch.zeros_like(self.buffers[4])
+        for i in range(1, n_frames + 1):
+            can_be_last = torch.logical_or(can_be_last, torch.roll(torch.clone(self.buffers[4]), i))
+            assert torch.sum(can_be_last > 1) == 0, f"can_be_last has greater than 1, {can_be_last[can_be_last > 1] = }"
+        can_be_last = torch.logical_not(can_be_last)
+        assert torch.sum(can_be_last < 0) == 0, f"can_be_last negative, {can_be_last[can_be_last < 0] = }"
+        if full_random:
+            weights = torch.ones_like(self.buffers[5]).float()
+        else:
+            weights = torch.clone(self.buffers[5]).float().view(-1).abs() + 1 / self.maxlen
+        weights = weights * can_be_last.view(-1)
 
-    def prioritize_random_sample(self, n_frames):
-        count_done = 1
-        idx = None
-        while count_done:
-            #  (state, condition, action_idx, reward, done, affect, next_state, next_condition)
-            weights = self.buffers[5].view(-1).abs() + 1 / self.maxlen
-            candidates = torch.multinomial(weights[n_frames - 1:], int(self.maxlen / 100))
-            candidates = candidates + n_frames - 1 # idx is last
-            idx = candidates[torch.randint(len(candidates), (1,))][0]
-            count_done = self.buffers[4][idx + 1 - n_frames:idx + 1 - 1].sum() # last frame can be done
+        idxs = torch.multinomial(weights[n_frames - 1:], times) + n_frames - 1
+        for idx in idxs:
+            assert torch.clone(self.buffers[4])[idx + 1 - n_frames:idx + 1 - 1].sum() == 0, f"contain done, {torch.clone(self.buffers[4])[idx + 1 - n_frames:idx + 1 - 1].sum() = }, {idx = }"
+            yield self[idx + 1 - n_frames:idx + 1]
 
-        return self[idx + 1 - n_frames:idx + 1]
+        # count_done = 1
+        # idx = None
+        # while count_done:
+        #     #  (state, condition, action_idx, reward, done, affect, next_state, next_condition)
+        #     candidates = candidates + n_frames - 1 # idx is last
+        #     idx = candidates[torch.randint(len(candidates), (1,))][0]
+        #     count_done = self.buffers[4][idx + 1 - n_frames:idx + 1 - 1].sum() # last frame can be done
+
+        # return self[idx + 1 - n_frames:idx + 1]
 
 def unpackbits(x, num_bits):
     if np.issubdtype(x.dtype, np.floating):

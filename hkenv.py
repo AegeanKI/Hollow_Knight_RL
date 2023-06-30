@@ -21,6 +21,7 @@ class Keys(enum.IntEnum):
 
 class Action:
     KEYS_MAP = ('up', 'down', 'left', 'right', 'z', 'x', 'c', 'v')
+    KEYS_NAME = ("UP", "DOWN", "LEFT", "RIGHT", "JUMP", "ATTACK", "DASH", "SPELL")
     ALL_POSSIBLE = unpackbits(np.arange(2 ** len(Keys)), len(Keys))
 
     ATTACK_HOLD_TIME = 1.35
@@ -33,6 +34,7 @@ class Action:
     def __init__(self, idx):
         self._idx = idx
         self.device = "cpu"
+        self.mutated = False
 
     @staticmethod
     def key_idx(key):
@@ -45,11 +47,13 @@ class Action:
         if self.has(key):
             return
         self._idx = self._idx + Action.key_idx(key)
+        self.mutated = True
 
     def _remove(self, key):
         if not self.has(key):
             return
         self._idx = self._idx - Action.key_idx(key)
+        self.mutated = True
 
     def to(self, device):
         self.device = device
@@ -117,9 +121,13 @@ class Action:
 
         for keya, keyb in [(Keys.LEFT, Keys.RIGHT), (Keys.UP, Keys.DOWN)]:
             if self.has(keya) and self.has(keyb):
-                candidates = [keya, keyb]
-                change_key = candidates[torch.randint(len(candidates), (1,))]
-                self._remove(change_key)
+                if torch.rand(1) < 0.5:
+                    self._remove(keya)
+                    self._remove(keyb)
+                else:
+                    candidates = [keya, keyb]
+                    change_key = candidates[torch.randint(len(candidates), (1,))]
+                    self._remove(change_key)
 
     def _replace(self):
         for keya, keyb in [(Keys.LEFT, Keys.RIGHT), (Keys.UP, Keys.DOWN)]:
@@ -158,6 +166,17 @@ class Action:
     @property
     def press_damage_key(self):
         return self.has(Keys.ATTACK) or self.has(Keys.SPELL)
+
+
+    def __repr__(self):
+        res = f"Action(idx = {self.idx.item():>3}, keys = [ "
+        for key, name in zip(Keys, Action.KEYS_NAME):
+            res = res + (name if self.has(key) else " " * len(name)) + " "
+        res = res + "])"
+        return res
+
+    def __str__(self):
+        return repr(self)
 
 class BasicAction:
     NULL = Action(0)
