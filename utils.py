@@ -30,11 +30,18 @@ class Counter():
         self.val = self.end
 
 class Memory():
-    def __init__(self, maxlen, size_list):
+    def __init__(self, maxlen, size_list, memory_dir):
         self.maxlen = maxlen
 
         self.buffers = [torch.zeros((maxlen, *size)) for size in size_list]
         self.count = 0
+        self.memory_dir = memory_dir
+        if not os.path.exists(memory_dir):
+            os.makedirs(self.memory_dir)
+
+    @property
+    def full(self):
+        return self.count == self.maxlen
 
     @staticmethod
     def shift(arr, num, val):
@@ -64,16 +71,20 @@ class Memory():
         return self.count
 
     def save(self, name):
+        print(f"saving memory", end='\r')
         for i in range(len(self.buffers)):
-            FileAdmin.safe_save(self.buffers[i], f"{name}_{i}", quiet=True)
-        with open(f"{name}_count", 'w') as f:
+            FileAdmin.safe_save(self.buffers[i], f"{self.memory_dir}/{name}_{i}", quiet=True)
+        with open(f"{self.memory_dir}/{name}_count", 'w') as f:
             f.write(f"{self.count}")
+        print(f"saving memory completed")
 
     def load(self, name):
+        print(f"loading memory", end='\r')
         for i in range(len(self.buffers)):
-            self.buffers[i] = FileAdmin.safe_load(self.buffers[i], f"{name}_{i}", quiet=True)
-        with open(f"{name}_count", 'r') as f:
+            self.buffers[i] = FileAdmin.safe_load(self.buffers[i], f"{self.memory_dir}/{name}_{i}", quiet=True)
+        with open(f"{self.memory_dir}/{name}_count", 'r') as f:
             self.count = int(f.readline())
+        print(f"loading memory completed")
 
     def random_sample(self, n_frames, times):
         return prioritize_sample(n_frames, times, full_random=True)

@@ -9,11 +9,11 @@ import numpy as np
 from collections import deque
 from argparse import ArgumentParser
 from torch.backends import cudnn
+from colorama import init, Fore, Back, Style
 from drqn import DRQN
 from pc import Logger
 from hkenv import Keys, Action, HKEnv
-from collections import deque
-from colorama import init, Fore, Back, Style
+from utils import Memory
 
 def limit_cpu():
     p = psutil.Process()
@@ -31,19 +31,14 @@ def interact(env, drqn, i_episode, train=True, indent=0):
     drqn.reset_net()
     state, condition = env.reset()
     episode_start_time = time.time()
+    choose_actions = torch.zeros(256)
     while True:
         print(f"step {t + 1}", end='\r')
         action, epsilon = drqn.choose_action(state, condition, train=train)
-        Logger.indent(indent)
-        if epsilon:
-            print(f"random {Fore.CYAN}{action}{Fore.RESET}")
-        else:
-            print(f"choose {action}")
+        if not epsilon:
+            choose_actions[action.idx] = choose_actions[action.idx] + 1
         if train:
             action.mutate(env.key_hold, env.observe_interval)
-            if not epsilon and action.mutated:
-                Logger.indent(indent)
-                print(f"-----> {Fore.YELLOW}{action}{Fore.RESET}")
         next_state, next_condition, reward, done, info = env.step(action)
         enemy_remain, affect, win = info
         assert not torch.isnan(done), f"done is nan, {done = }"
@@ -62,6 +57,7 @@ def interact(env, drqn, i_episode, train=True, indent=0):
         state, condition = next_state, next_condition
 
         if done:
+            print(f"most choose {Action(choose_actions.argmax())} {int(choose_actions.max())} / {int(choose_actions.sum())} times")
             Logger.clear_line()
             env.end(indent=indent)
             Logger.indent(indent=indent)
@@ -95,31 +91,34 @@ def evaluate(env, drqn, n_eval=1):
     for i_evaluate in range(n_eval):
         interact(env, drqn, i_evaluate, train=False, indent=4)
 
-def learn(env, drqn, n_episodes, n_episodes_save):
+def learn(env, drqn, memory, n_frames, n_episodes, n_episodes_save):
     start_learning = False
     for i_train in range(n_episodes):
         torch.cuda.empty_cache()
 
         episode_experiences = interact(env, drqn, i_train, train=True)
-        drqn.store_episode_experiences(episode_experiences)
+        memory.extend(episode_experiences)
 
-        if not drqn.can_learn:
+        if not memory.full:
             print(f"not enough memory, {len(drqn.memory)} / {memory_capacity}")
         elif not start_learning:
             start_learning = True
             print(f"enough memory, start learning")
 
-        if drqn.can_learn:
-            drqn.learn(times=episode_learn_times)
+        if memory.full:
+            samples = memory.prioritize_sample(n_frames, episode_learn_times)
+            drqn.learn(samples)
 
         if (i_train % n_episodes_save) == n_episodes_save - 1:
             drqn.save(f"drqn_training")
+            memory.save(f"drqn_training")
 
-            if drqn.can_learn:
+            if memory.full:
                 evaluate(env, drqn, n_eval=1)
 
     print(f"training completed")
     drqn.save(f"drqn_completed")
+    memory.save(f"drqn_completed")
 
 def read_args():
     parser = ArgumentParser()
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     target_replace_iter = memory_capacity // 2
     net_dir = "nets"
     memory_dir = "memories"
-    lr = 1
+    lr = 0.1
     epsilon = 0.2
     gamma = 0.9
     n_episodes = 2000
@@ -158,29 +157,30 @@ if __name__ == "__main__":
 
     drqn = DRQN(state_size=(3, h, w),
                 condition_size=len(Keys),
-                n_frames=n_frames,
                 out_classes=len(Action.ALL_POSSIBLE),
                 lr=lr,
                 total_steps=n_episodes*episode_learn_times,
                 epsilon=epsilon,
                 gamma=gamma,
-                memory_capacity=memory_capacity,
                 target_replace_iter=target_replace_iter,
                 net_dir=net_dir,
-                memory_dir=memory_dir,
                 device=device)
+
+                   # state, condition, action.idx, reward, done, affect, next_state, next_condition
+    memory_sizes = ((3, h, w), (len(Keys), ), (1, ), (1, ), (1, ), (1, ), (3, h, w), (len(Keys), ))
+    memory = Memory(memory_capacity, memory_sizes, memory_dir)
 
     env = HKEnv(observe_size=(w, h),
                 observe_interval=observe_interval,
                 device=device)
 
-    # drqn.save("drqn_training")
     drqn.load("drqn_training")
+    memory.load("drqn_training")
     # env.test()
 
     if args.evaluate:
         evaluate(env, drqn, n_eval=2)
     else:
-        learn(env, drqn, n_episodes, n_episodes_save)
+        learn(env, drqn, memory, n_frames, n_episodes, n_episodes_save)
 
     env.close()

@@ -10,24 +10,19 @@ from utils import Memory
 from network import ResNetLSTM
 
 class DRQN(nn.Module):
-    def __init__(self, state_size, condition_size, n_frames,
-                 out_classes, lr, total_steps, epsilon, gamma, memory_capacity, 
-                 target_replace_iter, net_dir, memory_dir, device):
+    def __init__(self, state_size, condition_size,
+                 out_classes, lr, total_steps, epsilon, gamma,
+                 target_replace_iter, net_dir, device):
         super().__init__()
 
         self.state_size = state_size
         self.condition_size = condition_size
-        self.n_frames = n_frames
 
         self.out_classes = out_classes
         self.eval_net = ResNetLSTM(out_classes=out_classes,
                                    in_condition_size=self.condition_size).to(device)
         self.target_net = ResNetLSTM(out_classes=out_classes,
                                      in_condition_size=self.condition_size).to(device)
-
-        self.memory = Memory(memory_capacity, (state_size, (condition_size, ),
-                                               (1, ), (1, ), (1, ), (1, ),
-                                               state_size, (condition_size, )))
 
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=lr)
         self.scheduler = torch.optim.lr_scheduler.CyclicLR(self.optimizer,
@@ -42,14 +37,10 @@ class DRQN(nn.Module):
         self.learn_step_counter = 0
         self.target_replace_iter = target_replace_iter
         self.net_dir = net_dir
-        self.memory_dir = memory_dir
 
         if not os.path.exists(self.net_dir):
             os.makedirs(self.net_dir)
-        if not os.path.exists(self.memory_dir):
-            os.makedirs(self.memory_dir)
 
-        # self.lr = lr
         self.epsilon = epsilon
         self.gamma = gamma
         self.device = device
@@ -67,7 +58,7 @@ class DRQN(nn.Module):
         actions_value = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0))
         print(f"warmup {actions_value.max().item() = }, {actions_value.min().item() = }")
 
-        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)) # n_frames
+        q_eval = self.eval_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0))
         q_next = self.target_net(fake_state.unsqueeze(0), fake_condition.unsqueeze(0)).detach()
 
         loss = self.loss_func(q_eval, q_eval)
@@ -89,33 +80,26 @@ class DRQN(nn.Module):
         action_idx = torch.argmax(actions_value)
         return Action(action_idx).to(self.device), epsilon
 
-    def store_episode_experiences(self, experiences):
-        self.memory.extend(experiences)
-
-    @property
-    def can_learn(self):
-        return len(self.memory) == self.memory.maxlen
-
-    def learn(self, times=1):
-        for i_learn, samples in enumerate(self.memory.prioritize_sample(self.n_frames, times)):
-            print(f"learning {i_learn + 1} / {times}", end='\r')
-            n_frames_experiences = [sample.to(self.device) for sample in samples]
+    def learn(self, samples):
+        for i_learn, sample in enumerate(samples):
+            print(f"learning {i_learn}", end='\r')
+            experience = [s.to(self.device) for s in sample]
 
             self.reset_net()
 
-            (n_frames_state, n_frames_condition,
-             n_frames_action_idx, n_frames_reward, n_frames_done, n_frames_affect,
-             n_frames_next_state, n_frames_next_condition) = n_frames_experiences
+            (state, condition,
+             action_idx, reward, done, affect,
+             next_state, next_condition) = experience
 
-            q_eval = self.eval_net(n_frames_state, n_frames_condition)
-            q_eval = torch.gather(q_eval, dim=1, index=n_frames_action_idx.long())
+            q_eval = self.eval_net(state, condition)
+            q_eval = torch.gather(q_eval, dim=1, index=action_idx.long())
 
-            n_frames_next_action_value = self.eval_net(n_frames_next_state, n_frames_next_condition).detach()
-            n_frames_next_action_idx = n_frames_next_action_value.argmax(dim=1)[0].view(-1, 1)
-            q_next = self.target_net(n_frames_next_state, n_frames_next_condition).detach()
-            q_next = torch.gather(q_next, dim=1, index=n_frames_next_action_idx.long())
+            next_action_value = self.eval_net(next_state, next_condition).detach()
+            next_action_idx = next_action_value.argmax(dim=1)[0].view(-1, 1)
+            q_next = self.target_net(next_state, next_condition).detach()
+            q_next = torch.gather(q_next, dim=1, index=next_action_idx.long())
 
-            q_target = n_frames_reward + self.gamma * q_next * (1 - n_frames_done)
+            q_target = reward + self.gamma * q_next * (1 - done)
 
             loss = self.loss_func(q_eval, q_target)
             self.optimizer.zero_grad()
@@ -128,9 +112,9 @@ class DRQN(nn.Module):
                 print(f"copy target from eval")
                 self.target_net.load_state_dict(self.eval_net.state_dict())
 
-            del n_frames_state, n_frames_condition
-            del n_frames_action_idx, n_frames_reward, n_frames_done
-            del n_frames_next_state, n_frames_next_condition
+            del state, condition
+            del action_idx, reward, done
+            del next_state, next_condition
             del q_eval, q_next, q_target, loss
         Logger.clear_line()
         print(f"learning completed")
@@ -140,18 +124,8 @@ class DRQN(nn.Module):
         FileAdmin.safe_save_net(self.eval_net, f"{self.net_dir}/{name}", quiet=True)
         print(f"saving net completed")
 
-        print(f"saving memory", end='\r')
-        self.memory.save(f"{self.memory_dir}/{name}")
-        print(f"saving memory completed")
-
     def load(self, name):
         print(f"loading net", end='\r')
         self.eval_net = FileAdmin.safe_load_net(self.eval_net, f"{self.net_dir}/{name}", quiet=True)
         self.target_net = FileAdmin.safe_load_net(self.target_net, f"{self.net_dir}/{name}", quiet=True)
         print(f"loading net completed")
-
-        print(f"loading memory", end='\r')
-        self.memory.load(f"{self.memory_dir}/{name}")
-        print(f"loading memory completed")
-
-        self.warmup()
