@@ -16,7 +16,7 @@ import torch
 import config
 from ac_model import ActorCritic
 from controls import ControlKeys
-from env import HollowKnightEnv
+from env import BossDamageTracker, HollowKnightEnv
 
 
 def parse_args():
@@ -59,21 +59,20 @@ def main():
             obs = env.reset(should_stop=ctrl.should_stop)
             if obs is None:                      # 自動開場失敗/被中止 -> 跳過本場
                 continue
-            boss0, last_boss, done, steps, info = None, -1, False, 0, {}
+            boss = BossDamageTracker()
+            done, steps, info = False, 0, {}
             while not done and not ctrl.stop:
                 ot = torch.from_numpy(obs).to(device)
                 a, _, _ = ac.act(ot, deterministic=True)
                 obs, r, term, trunc, info = env.step(a)
                 done = term or trunc; steps += 1
-                if boss0 is None and info["boss_hp_raw"] >= 0:
-                    boss0 = info["boss_hp_raw"]
-                last_boss = info["boss_hp_raw"]
+                boss.update(info)
             if steps == 0:
                 continue
-            dmg = (boss0 - last_boss) if boss0 is not None else 0
+            dmg = boss.dmg
             dmgs.append(dmg); results.append(info["result"])
             print(f"[EP {ep}] result={info['result']} dmg={dmg:.0f} "
-                  f"boss剩={last_boss} steps={steps}")
+                  f"boss剩={boss.last} steps={steps}")
     finally:
         env.close()
 

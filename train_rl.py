@@ -31,6 +31,7 @@ import argparse
 import csv
 import os
 import time
+from collections import namedtuple
 
 import numpy as np
 import torch
@@ -38,7 +39,7 @@ import torch
 import config
 from ac_model import ActorCritic
 from controls import ControlKeys
-from env import HollowKnightEnv
+from env import BossDamageTracker, HollowKnightEnv
 from ppo import RolloutBuffer, ppo_update
 
 # 固定輸入尺寸 -> 讓 cudnn 選好演算法（也避開 CUDNN_STATUS_NOT_SUPPORTED 的 plan warning）
@@ -74,29 +75,68 @@ def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg):
                 "update_i": update_i, "ep_i": ep_i, "best_dmg": best_dmg}, path)
 
 
+def eval_one_episode(env, ac, device, should_stop):
+    """跑單場決定性（不取樣）戰鬥，回傳 (result, damage)。
+    無法完成（reset 失敗/被中止、或 0 步）回傳 None。"""
+    obs = env.reset(should_stop=should_stop)
+    if obs is None:                              # reset 失敗/被中止
+        return None
+    boss = BossDamageTracker()
+    done, info = False, {}
+    while not done and not should_stop():
+        ot = torch.from_numpy(obs).to(device)
+        a, _, _ = ac.act(ot, deterministic=True)
+        obs, r, term, trunc, info = env.step(a)
+        done = term or trunc
+        boss.update(info)
+    if not info:                                 # 0 步（一進去就被 stop）
+        return None
+    return info["result"], boss.dmg
+
+
 def run_eval(env, ac, device, n_eps, should_stop):
-    """跑 n_eps 場決定性（不取樣）戰鬥，回傳 (results, damages)。"""
+    """跑 n_eps 場決定性評估，回傳 (results, damages)。"""
     res, dmgs = [], []
     for _ in range(n_eps):
         if should_stop():
             break
-        obs = env.reset(should_stop=should_stop)
-        if obs is None:                          # reset 失敗/被中止 -> 跳過這場 eval
+        ep = eval_one_episode(env, ac, device, should_stop)
+        if ep is None:                           # reset 失敗/被中止/0 步 -> 停止評估
             break
-        boss0, last_boss, done, info = None, -1, False, {}
-        while not done and not should_stop():
-            ot = torch.from_numpy(obs).to(device)
-            a, _, _ = ac.act(ot, deterministic=True)
-            obs, r, term, trunc, info = env.step(a)
-            done = term or trunc
-            if boss0 is None and info["boss_hp_raw"] >= 0:
-                boss0 = info["boss_hp_raw"]
-            last_boss = info["boss_hp_raw"]
-        if not info:                             # 0 步（一進去就被 stop）
-            break
-        res.append(info["result"])
-        dmgs.append((boss0 - last_boss) if boss0 is not None else 0)
+        result, dmg = ep
+        res.append(result)
+        dmgs.append(dmg)
     return res, dmgs
+
+
+# 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
+EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop")
+
+
+def collect_one_episode(env, ac, device, should_stop):
+    """跑單場訓練戰鬥（動作取樣探索），收集 transitions 與統計。
+    回傳 EpisodeData；無法完成（reset 失敗/被中止、或 0 步）回傳 None。
+    收不收進 buffer（遙測健康度）由呼叫端決定。"""
+    obs = env.reset(should_stop=should_stop)
+    if obs is None:                              # 自動開場失敗/被中止
+        return None
+    boss = BossDamageTracker()
+    done, ep_r, steps, info = False, 0.0, 0, {}
+    trans = []
+    while not done and not should_stop():
+        ot = torch.from_numpy(obs).to(device)
+        action, logp, value = ac.act(ot)
+        obs2, r, term, trunc, info = env.step(action)
+        done = term or trunc
+        # 超時(truncation)非真終局：用最後狀態 value bootstrap，避免低估結尾
+        boot = ac.value(torch.from_numpy(obs2).to(device)) if (trunc and not term) else 0.0
+        trans.append((obs, action, logp, r, value, float(done), float(term), boot))
+        obs = obs2; ep_r += r; steps += 1
+        boss.update(info)
+    if steps == 0:                               # 0 步（剛 reset 完就被 stop）
+        return None
+    return EpisodeData(trans=trans, result=info["result"], dmg=boss.dmg,
+                       ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0))
 
 
 def parse_args():
@@ -179,40 +219,21 @@ def main():
                 ctrl.wait_while_paused(on_pause=env.act.release_all, log=log)
                 if ctrl.stop:                        # 暫停等待中按了 F10 -> 別再開下一場
                     break
-                obs = env.reset(should_stop=ctrl.should_stop)
-                if obs is None:                      # B3：自動開場失敗/被中止 -> 跳過本場，不崩
-                    continue
-                boss0, last_boss = None, -1
-                done, ep_r, steps, info = False, 0.0, 0, {}
-                ep_trans = []                        # 先暫存本場 transitions，場末再決定收不收
-                while not done and not ctrl.stop:
-                    ot = torch.from_numpy(obs).to(device)
-                    action, logp, value = ac.act(ot)
-                    obs2, r, term, trunc, info = env.step(action)
-                    done = term or trunc
-                    # 超時(truncation)非真終局：用最後狀態 value bootstrap，避免低估結尾
-                    boot = ac.value(torch.from_numpy(obs2).to(device)) if (trunc and not term) else 0.0
-                    ep_trans.append((obs, action, logp, r, value, float(done), float(term), boot))
-                    obs = obs2; ep_r += r; steps += 1
-                    if boss0 is None and info["boss_hp_raw"] >= 0:
-                        boss0 = info["boss_hp_raw"]
-                    last_boss = info["boss_hp_raw"]
-                if steps == 0:                       # 0 步（剛 reset 完就被 stop）
+                ep = collect_one_episode(env, ac, device, ctrl.should_stop)
+                if ep is None:                       # B3：自動開場失敗/被中止/0 步 -> 跳過本場，不崩
                     continue
                 ep_i += 1
-                dmg = (boss0 - last_boss) if boss0 is not None else 0
-                drop = info.get("tele_drop", 0.0)
-                drops.append(drop)
+                drops.append(ep.drop)
                 # B4：遙測掉太兇 -> reward 訊號不可信，整場丟棄不納入更新（但仍記錄）
-                healthy = drop <= TELE_DROP_DISCARD
+                healthy = ep.drop <= TELE_DROP_DISCARD
                 if healthy:
-                    for tr in ep_trans:
+                    for tr in ep.trans:
                         buf.add(*tr)
-                flag = ("" if drop <= TELE_DROP_WARN
-                        else f"  ⚠遙測掉包{drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
-                ep_summ.append((info["result"], dmg, ep_r, steps, healthy))
-                log(f"  EP{ep_i}: {str(info['result']):>5} dmg={dmg:4.0f} "
-                    f"reward={ep_r:6.2f} steps={steps}{flag}")
+                flag = ("" if ep.drop <= TELE_DROP_WARN
+                        else f"  ⚠遙測掉包{ep.drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
+                ep_summ.append((ep.result, ep.dmg, ep.ep_r, ep.steps, healthy))
+                log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f} "
+                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{flag}")
 
             if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
                 if ctrl.stop:
