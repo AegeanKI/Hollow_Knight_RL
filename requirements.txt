@@ -1,0 +1,7 @@
+# 階段 0 依賴（已安裝）
+mss
+numpy
+opencv-python
+pynput
+pydirectinput
+# torch 已另裝 (cu118)，dxcam 之後若要更快擷取再用

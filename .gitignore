@@ -1,0 +1,23 @@
+# Python 快取
+__pycache__/
+*.pyc
+
+# 訓練資料（大型/可重生，不進版控）— 僅保留難度校正參考圖
+data/*
+!data/target_difficulty.png
+
+# 模型權重（大型二進位，不進版控）
+checkpoints/
+
+# 日誌與除錯擷取圖（可重生）
+logs/
+*.log
+capture_raw.png
+capture_obs.png
+
+# C# mod 編譯輸出
+mod/**/bin/
+mod/**/obj/
+
+# 本機專屬設定
+.claude/settings.local.json
