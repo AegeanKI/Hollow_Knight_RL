@@ -78,7 +78,7 @@ def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg):
 def eval_one_episode(env, ac, device, should_stop):
     """跑單場決定性（不取樣）戰鬥，回傳 (result, damage)。
     無法完成（reset 失敗/被中止、或 0 步）回傳 None。"""
-    obs = env.reset(should_stop=should_stop)
+    obs, _ = env.reset(should_stop=should_stop)
     if obs is None:                              # reset 失敗/被中止
         return None
     boss = BossDamageTracker()
@@ -117,7 +117,7 @@ def collect_one_episode(env, ac, device, should_stop):
     """跑單場訓練戰鬥（動作取樣探索），收集 transitions 與統計。
     回傳 EpisodeData；無法完成（reset 失敗/被中止、或 0 步）回傳 None。
     收不收進 buffer（遙測健康度）由呼叫端決定。"""
-    obs = env.reset(should_stop=should_stop)
+    obs, _ = env.reset(should_stop=should_stop)
     if obs is None:                              # 自動開場失敗/被中止
         return None
     boss = BossDamageTracker()

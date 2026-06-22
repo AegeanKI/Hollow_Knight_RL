@@ -82,16 +82,16 @@ class HollowKnightEnv:
 
     # ---- Gym API ----
     def reset(self, max_retries=8, should_stop=None):
-        """自動開場進入新一場戰鬥，回傳初始觀測。
+        """自動開場進入新一場戰鬥。回傳 (obs, info)（Gymnasium 慣例）。
 
         B3：永不硬炸。自動開場失敗就退避重試（次數遞增、間隔遞增），
-        全程可被 should_stop 打斷。連續失敗到上限仍不成功時，回傳 None
+        全程可被 should_stop 打斷。連續失敗到上限仍不成功時，回傳 (None, {})
         （讓訓練端優雅跳過本場/停止，而不是讓整個 session 崩潰）。
         """
         self.act.release_all()
         for attempt in range(max_retries):
             if should_stop and should_stop():
-                return None
+                return None, {}
             if start_challenge(self.cap, self.act, self.rx):
                 self.reset_fail_count = 0
                 self.monitor = EpisodeMonitor()
@@ -104,14 +104,14 @@ class HollowKnightEnv:
                 self._tele_ok = 0
                 self._tele_total = 0
                 self._next_t = time.perf_counter() + config.TICK_DT
-                return self.stacker.get()
+                return self.stacker.get(), {}
             wait = min(1.0 * (attempt + 1), 5.0)     # 退避：1,2,3,4,5,5...
             print(f"  reset 第 {attempt + 1}/{max_retries} 次未成功，{wait:.0f}s 後重試...")
             self._sleep_interruptible(wait, should_stop)
         self.reset_fail_count += 1
         print(f"  ⚠ reset 連續 {max_retries} 次失敗（累計失敗 {self.reset_fail_count} 場）："
               f"請確認角色在雕像前、mod/遊戲正常。本場跳過，不中斷訓練。")
-        return None
+        return None, {}
 
     def tele_drop_rate(self):
         """本場目前為止的遙測掉包率（0=全程有新鮮遙測，1=完全收不到）。"""

@@ -51,7 +51,7 @@ def main():
             ctrl.wait_while_paused(on_pause=env.act.release_all)
             if ctrl.stop:
                 break
-            obs = env.reset(should_stop=ctrl.should_stop)
+            obs, _ = env.reset(should_stop=ctrl.should_stop)
             if obs is None:                      # 自動開場失敗/被中止
                 continue
             total_r, steps, done, info = 0.0, 0, False, {}

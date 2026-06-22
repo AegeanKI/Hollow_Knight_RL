@@ -14,7 +14,7 @@ F7=開始錄、F8=存檔——由 take() 取走事件。
         ctrl.wait_while_paused(on_pause=env.act.release_all)   # episode 之間
         if ctrl.stop:                       # 暫停中可能按了 F10
             break
-        obs = env.reset(should_stop=ctrl.should_stop)
+        obs, _ = env.reset(should_stop=ctrl.should_stop)
         while not done and not ctrl.stop:
             ...
 
