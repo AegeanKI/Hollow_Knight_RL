@@ -9,38 +9,48 @@
      → 它會送出對應按鈕 0.8 秒，HK 就綁到那顆鈕。
   4. 逐一綁完所有動作。輸入 q 離開。
 
-對應（你在 HK 要把每個動作綁成右邊那顆）：
+動作清單與對應按鈕都從 config.Action + GamepadActuator 的實際對應自動產生，不再手寫。
 """
 import time
 
 import config
 from inputs import GamepadActuator
 
-# (編號, 顯示名, Action實體鍵, 手把按鈕說明)
-MENU = [
-    ("1", "JUMP", "z", "A"),
-    ("2", "ATTACK", "x", "X"),
-    ("3", "DASH", "c", "B"),
-    ("4", "CAST", "v", "Y"),
-    ("5", "SUPER_DASH", "s", "LB 左肩"),
-    ("6", "FOCUS", "a", "RB 右肩"),
-    ("7", "DREAM_NAIL", "d", "RT 右扳機"),
-    ("8", "UP", "up", "D-pad/左搖桿 上"),
-    ("9", "DOWN", "down", "D-pad/左搖桿 下"),
-    ("10", "LEFT", "left", "D-pad/左搖桿 左"),
-    ("11", "RIGHT", "right", "D-pad/左搖桿 右"),
-]
-BYNUM = {num: (key, name) for num, name, key, _ in MENU}
+# XUSB 按鈕 -> 人類可讀標籤（純顯示用；按鈕識別碼取自 vgamepad enum 的 .name）
+_BUTTON_LABELS = {
+    "XUSB_GAMEPAD_A": "A", "XUSB_GAMEPAD_B": "B",
+    "XUSB_GAMEPAD_X": "X", "XUSB_GAMEPAD_Y": "Y",
+    "XUSB_GAMEPAD_LEFT_SHOULDER": "LB 左肩",
+    "XUSB_GAMEPAD_RIGHT_SHOULDER": "RB 右肩",
+    "XUSB_GAMEPAD_DPAD_UP": "D-pad/左搖桿 上",
+    "XUSB_GAMEPAD_DPAD_DOWN": "D-pad/左搖桿 下",
+    "XUSB_GAMEPAD_DPAD_LEFT": "D-pad/左搖桿 左",
+    "XUSB_GAMEPAD_DPAD_RIGHT": "D-pad/左搖桿 右",
+}
+_TRIGGER_LABELS = {"left": "LT 左扳機", "right": "RT 右扳機"}
+
+
+def _button_label(act, action):
+    """依 GamepadActuator 實際的對應，推出某動作要綁到哪顆手把鈕（人類可讀）。"""
+    key = action.value
+    if key in act.trigger_map:
+        return _TRIGGER_LABELS.get(act.trigger_map[key], act.trigger_map[key])
+    btn = act.button_map.get(key)
+    if btn is None:
+        return "(未綁定)"
+    return _BUTTON_LABELS.get(btn.name, btn.name)
 
 
 def main():
     act = GamepadActuator()   # 建立虛擬手把並保持存在
-    # 送一下中性狀態，幫助系統/遊戲偵測到手把
-    act.release_all()
+    act.release_all()         # 送中性狀態，幫助系統/遊戲偵測到手把
     print("虛擬手把已建立並保持中。HK 的手把設定現在應該偵測得到。\n")
+
+    actions = config.ACTIONS                       # 依 config 定義順序
+    bynum = {str(i + 1): a for i, a in enumerate(actions)}
     print("動作對應（HK 手把設定請綁成右側按鈕）：")
-    for num, name, _key, btn in MENU:
-        print(f"  {num:>2}. {name:<11} → {btn}")
+    for i, a in enumerate(actions):
+        print(f"  {i + 1:>2}. {a.name:<11} → {_button_label(act, a)}")
     print("\n輸入編號 + Enter 送出該按鈕（會倒數 3 秒讓你切回 HK 綁定格），q 離開。")
 
     try:
@@ -48,16 +58,16 @@ def main():
             s = input("送出哪個動作？編號(或 q)： ").strip().lower()
             if s in ("q", "quit", "exit"):
                 break
-            if s not in BYNUM:
+            a = bynum.get(s)
+            if a is None:
                 print("  無效編號"); continue
-            key, name = BYNUM[s]
-            print(f"  3 秒後送出 {name}，請切到 HK 並點選要綁定的格子...")
+            print(f"  3 秒後送出 {a.name}，請切到 HK 並點選要綁定的格子...")
             for i in range(3, 0, -1):
                 print(f"   {i}..."); time.sleep(1)
-            act.apply_keys({key})
+            act.apply_keys({a.value})
             time.sleep(0.8)
             act.apply_keys(set())
-            print(f"  已送出 {name}（{key}）。")
+            print(f"  已送出 {a.name}（{a.value}）。")
     finally:
         act.release_all()
         print("離開，手把已釋放。")

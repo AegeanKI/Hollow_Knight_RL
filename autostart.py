@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 import config
+from config import Action
 
 # --- 可調參數 ---
 MENU_OPEN_THRESH = 7.0    # 按 UP 後畫面平均像素差 > 此值 => 菜單開始出現（一偵測到就停按 UP）
@@ -116,7 +117,7 @@ def ensure_attuned(cap, act, max_up=4):
         else:
             print(f"  [難度] 目前非調諧級，按 UP 上移（score={score:.2f}）")
         if i < max_up:
-            _tap(act, "up")
+            _tap(act, Action.UP.value)
             time.sleep(0.2)
             _wait_settle(cap, timeout=1.5)
     print("  ⚠ 多次 UP 後仍未確認調諧級，仍以目前難度嘗試開打。")
@@ -143,7 +144,7 @@ def wake_up(cap, act):
     """按 Z 叫醒角色（死亡重生後會躺地，需先操控一下才站起）。
     Z 會喚醒但不會開難度菜單；站著時只是原地跳，無害。叫醒後等畫面靜止，
     讓後續 open_menu 的基準畫面是站姿，避免把「站起來」誤判成「菜單開了」。"""
-    _tap(act, "z")
+    _tap(act, Action.JUMP.value)
     time.sleep(0.5)
     _wait_settle(cap, timeout=3.0)
 
@@ -156,7 +157,7 @@ def open_menu(cap, act, max_attempts=4):
     """
     base = cap.grab_obs()
     for attempt in range(max_attempts):
-        _tap(act, "up")
+        _tap(act, Action.UP.value)
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 1.8:
             diff = _framediff(cap.grab_obs(), base)
@@ -237,7 +238,7 @@ def start_challenge(cap, act, rx):
     # 按 Z 確認難度；若沒開打就再按一次 Z（不重按 UP，避免動到難度）
     for z_try in range(2):
         print("  [確認難度] 按 Z 選調諧級" + ("（重試）" if z_try else ""))
-        _tap(act, "z")
+        _tap(act, Action.JUMP.value)
         if wait_fight_start(cap, rx):
             time.sleep(0.3)   # 給一點緩衝讓畫面穩定
             return True

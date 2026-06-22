@@ -16,6 +16,7 @@ import argparse
 import time
 
 import config
+from config import Action
 from inputs import make_actuator
 
 
@@ -46,19 +47,19 @@ def main():
 
     print("開始輸入測試：")
     try:
-        hold(act, ["left"], 0.8, "左")
-        hold(act, ["right"], 0.8, "右")
-        hold(act, ["up"], 0.8, "上")
-        hold(act, ["down"], 0.8, "下")
-        # hold(act, ["left"], 0.8, "左走")
-        # hold(act, ["right"], 0.8, "左走")
-        # hold(act, ["z"], 0.1, "短跳")
-        # hold(act, ["z"], 0.5, "長跳(按久一點，應該跳更高)")
-        # hold(act, ["x"], 0.1, "攻擊")
-        # hold(act, ["c"], 0.1, "衝刺")
+        hold(act, [Action.LEFT.value], 0.8, "左")
+        hold(act, [Action.RIGHT.value], 0.8, "右")
+        hold(act, [Action.UP.value], 0.8, "上")
+        hold(act, [Action.DOWN.value], 0.8, "下")
+        # hold(act, [Action.LEFT.value], 0.8, "左走")
+        # hold(act, [Action.RIGHT.value], 0.8, "右走")
+        # hold(act, [Action.JUMP.value], 0.1, "短跳")
+        # hold(act, [Action.JUMP.value], 0.5, "長跳(按久一點，應該跳更高)")
+        # hold(act, [Action.ATTACK.value], 0.1, "攻擊")
+        # hold(act, [Action.DASH.value], 0.1, "衝刺")
         # # 組合鍵：右走同時攻擊
-        # hold(act, ["right", "x"], 0.4, "右走+攻擊")
-        # hold(act, ["d"], 1.0, "夢之釘")
+        # hold(act, [Action.RIGHT.value, Action.ATTACK.value], 0.4, "右走+攻擊")
+        # hold(act, [Action.DREAM_NAIL.value], 1.0, "夢之釘")
     finally:
         act.release_all()
     print("測試結束。角色有照上面動作動嗎？")

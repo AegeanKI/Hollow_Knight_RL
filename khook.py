@@ -11,16 +11,16 @@ import time
 
 from pynput import keyboard
 
-from config import ACTION_KEYS
+from config import ACTION_KEYS, Action
 from controls import ControlKeys
 
 # 從 config 的動作鍵自動推導要監聽哪些鍵（新增/換鍵不用動這支）。
 # 特殊鍵（方向鍵）走 pynput.Key；單字元鍵走 .char。
 _DIRECTION_KEYS = {
-    "up": keyboard.Key.up,
-    "down": keyboard.Key.down,
-    "left": keyboard.Key.left,
-    "right": keyboard.Key.right,
+    Action.UP.value: keyboard.Key.up,
+    Action.DOWN.value: keyboard.Key.down,
+    Action.LEFT.value: keyboard.Key.left,
+    Action.RIGHT.value: keyboard.Key.right,
 }
 _SPECIAL = {_DIRECTION_KEYS[k]: k for k in ACTION_KEYS if k in _DIRECTION_KEYS}
 _CHARS = {k for k in ACTION_KEYS if len(k) == 1}

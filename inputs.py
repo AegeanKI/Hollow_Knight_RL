@@ -6,6 +6,7 @@ Actuator 維護「目前實際按住」的狀態，每個 tick 只送出差異�
 """
 import pydirectinput
 
+from config import Action
 from keys import vec_to_keys
 
 # 低延遲設定：拿掉每次操作之間的內建延遲與 failsafe。
@@ -50,19 +51,26 @@ class GamepadActuator:
                               "（會一併安裝 ViGEmBus 驅動，過程會跳 UAC）") from e
         self.pad = vg.VX360Gamepad()
         B = vg.XUSB_BUTTON
-        # Action 的實體鍵字串 -> 手把按鈕（遊戲內手把控制需綁成這個對應）
-        self.button_map = {
-            "up": B.XUSB_GAMEPAD_DPAD_UP, "down": B.XUSB_GAMEPAD_DPAD_DOWN,
-            "left": B.XUSB_GAMEPAD_DPAD_LEFT, "right": B.XUSB_GAMEPAD_DPAD_RIGHT,
-            "z": B.XUSB_GAMEPAD_A,               # JUMP
-            "x": B.XUSB_GAMEPAD_X,               # ATTACK
-            "c": B.XUSB_GAMEPAD_B,               # DASH
-            "v": B.XUSB_GAMEPAD_Y,               # CAST
-            "s": B.XUSB_GAMEPAD_LEFT_SHOULDER,   # SUPER_DASH (LB)
-            "a": B.XUSB_GAMEPAD_RIGHT_SHOULDER,  # FOCUS (RB)
+        # 動作(Action) -> 手把按鈕。用 Action enum 當 key，確保與 config 的動作定義同步
+        # （遊戲內手把控制需把每個動作綁成這裡對應的按鈕）。
+        action_to_button = {
+            Action.UP: B.XUSB_GAMEPAD_DPAD_UP,
+            Action.DOWN: B.XUSB_GAMEPAD_DPAD_DOWN,
+            Action.LEFT: B.XUSB_GAMEPAD_DPAD_LEFT,
+            Action.RIGHT: B.XUSB_GAMEPAD_DPAD_RIGHT,
+            Action.JUMP: B.XUSB_GAMEPAD_A,
+            Action.ATTACK: B.XUSB_GAMEPAD_X,
+            Action.DASH: B.XUSB_GAMEPAD_B,
+            Action.CAST: B.XUSB_GAMEPAD_Y,
+            Action.SUPER_DASH: B.XUSB_GAMEPAD_LEFT_SHOULDER,   # LB
+            Action.FOCUS: B.XUSB_GAMEPAD_RIGHT_SHOULDER,       # RB
         }
-        # 扳機類（HK 不接受搖桿按下 R3，改用扳機）
-        self.trigger_map = {"d": "right"}        # DREAM_NAIL -> RT 右扳機
+        # apply_keys 進來的是實體鍵字串集合(Action.value)，故轉成字串為 key
+        self.button_map = {a.value: btn for a, btn in action_to_button.items()}
+        # 扳機是「類比軸」不是按鈕，XUSB_BUTTON 沒有扳機常數；改用 pad.left_trigger()/
+        # right_trigger() 驅動，故這裡用 "left"/"right" 字串選哪一邊。
+        # （HK 不接受搖桿按下 R3，DREAM_NAIL 改綁 RT 右扳機。）
+        self.trigger_map = {Action.DREAM_NAIL.value: "right"}
         self._held = set()
 
     def apply_keys(self, target):
@@ -75,8 +83,8 @@ class GamepadActuator:
         self.pad.left_trigger(value=255 if any(self.trigger_map.get(k) == "left" for k in target) else 0)
         self.pad.right_trigger(value=255 if any(self.trigger_map.get(k) == "right" for k in target) else 0)
         # 同時驅動左搖桿（遊戲多半讀搖桿；D-pad 給選單用），數位滿舵
-        x = (1 if "right" in target else 0) - (1 if "left" in target else 0)
-        y = (1 if "up" in target else 0) - (1 if "down" in target else 0)
+        x = (1 if Action.RIGHT.value in target else 0) - (1 if Action.LEFT.value in target else 0)
+        y = (1 if Action.UP.value in target else 0) - (1 if Action.DOWN.value in target else 0)
         self.pad.left_joystick(x_value=int(x * 32767), y_value=int(y * 32767))
         self.pad.update()
         self._held = set(target)

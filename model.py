@@ -8,6 +8,12 @@ import torch.nn as nn
 
 import config
 
+# 對向鍵（不能同時按）的 index 對，預先算好避免每次推論重查（用 Action 而非字串）
+_OPPOSITE_IDX = [
+    (config.ACTIONS.index(config.Action.UP), config.ACTIONS.index(config.Action.DOWN)),
+    (config.ACTIONS.index(config.Action.LEFT), config.ACTIONS.index(config.Action.RIGHT)),
+]
+
 
 class PolicyNet(nn.Module):
     def __init__(self, in_ch=None, n_actions=None):
@@ -37,8 +43,7 @@ class PolicyNet(nn.Module):
         probs = torch.sigmoid(logits)[0].cpu().numpy()
         vec = (probs > threshold).astype("uint8")
         if resolve_opposites:
-            for a, b in (("UP", "DOWN"), ("LEFT", "RIGHT")):
-                ia, ib = config.ACTION_NAMES.index(a), config.ACTION_NAMES.index(b)
+            for ia, ib in _OPPOSITE_IDX:
                 if vec[ia] and vec[ib]:                       # 同時按對向鍵 -> 留機率高的
                     drop = ib if probs[ia] >= probs[ib] else ia
                     vec[drop] = 0
