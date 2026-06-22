@@ -12,20 +12,24 @@ import time
 
 import numpy as np
 import torch
-from pynput import keyboard
 
 import config
 from ac_model import ActorCritic
+from controls import ControlKeys
 from env import HollowKnightEnv
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=str, default=None, help="checkpoints/ 下檔名或完整路徑")
     ap.add_argument("--latest", action="store_true", help="評估 rl_latest.pt")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--input", choices=["keyboard", "gamepad"], default=config.INPUT_BACKEND)
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
 
     if args.ckpt:
         path = args.ckpt if os.path.exists(args.ckpt) else os.path.join(config.CKPT_DIR, args.ckpt)
@@ -38,17 +42,7 @@ def main():
     ac.load_state_dict(ck["model"])
     print(f"評估 {path} (update {ck['update_i']}, ep {ck['ep_i']})")
 
-    stop = {"v": False}
-    pause = {"v": False}
-
-    def on_press(k):
-        if k == keyboard.Key.f10:
-            stop["v"] = True
-        elif k == keyboard.Key.f9:
-            pause["v"] = not pause["v"]
-            print("⏸ 收到暫停請求，本場結束後暫停。" if pause["v"] else "▶ 取消暫停。")
-
-    keyboard.Listener(on_press=on_press).start()
+    ctrl = ControlKeys().start()
     print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 中止；F9 暫停/繼續）")
     for i in range(5, 0, -1):
         print(f"  {i}..."); time.sleep(1)
@@ -57,22 +51,16 @@ def main():
     dmgs, results = [], []
     try:
         for ep in range(1, args.episodes + 1):
-            if stop["v"]:
+            if ctrl.stop:
                 break
-            if pause["v"]:
-                env.act.release_all()
-                print("⏸ 已暫停。可開 HK 選單檢查映射/難度/護符。再按 F9 繼續，F10 停止。")
-                while pause["v"] and not stop["v"]:
-                    time.sleep(0.1)
-                if not stop["v"]:
-                    print("▶ 繼續。")
-            if stop["v"]:
+            ctrl.wait_while_paused(on_pause=env.act.release_all)
+            if ctrl.stop:
                 break
-            obs = env.reset(should_stop=lambda: stop["v"])
+            obs = env.reset(should_stop=ctrl.should_stop)
             if obs is None:                      # 自動開場失敗/被中止 -> 跳過本場
                 continue
             boss0, last_boss, done, steps, info = None, -1, False, 0, {}
-            while not done and not stop["v"]:
+            while not done and not ctrl.stop:
                 ot = torch.from_numpy(obs).to(device)
                 a, _, _ = ac.act(ot, deterministic=True)
                 obs, r, term, trunc, info = env.step(a)

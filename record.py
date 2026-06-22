@@ -20,36 +20,13 @@ import os
 import time
 
 import numpy as np
-from pynput import keyboard
 
 import config
 from capture import Capturer
+from controls import ControlKeys
 from keys import keys_to_vec
 from khook import KeyboardHook
 from telemetry import TelemetryReceiver
-
-
-class _Control:
-    """獨立的小 listener，處理 F7(開始) / F8(結束) / F10(離開)。"""
-    def __init__(self):
-        self.start_req = False
-        self.stop_req = False
-        self.quit = False
-        self._l = keyboard.Listener(on_press=self._on)
-
-    def start(self):
-        self._l.start()
-
-    def stop(self):
-        self._l.stop()
-
-    def _on(self, key):
-        if key == keyboard.Key.f7:
-            self.start_req = True
-        elif key == keyboard.Key.f8:
-            self.stop_req = True
-        elif key == keyboard.Key.f10:
-            self.quit = True
 
 
 def _next_episode_path():
@@ -91,10 +68,10 @@ def main():
     cap = Capturer()
     hook = KeyboardHook()
     rx = TelemetryReceiver()
-    ctrl = _Control()
+    # F7=開始錄、F8=存檔（邊緣觸發）；F10=離開（內建 stop）
+    ctrl = ControlKeys().bind_edge("f7", "start").bind_edge("f8", "save").start()
     hook.start()
     rx.start()
-    ctrl.start()
 
     buf = _empty_buf()
     n_saved = 0
@@ -108,7 +85,7 @@ def main():
     i = 0
     slow_ticks = 0
     try:
-        while not ctrl.quit:
+        while not ctrl.stop:
             target = start + i * dt
             now = time.perf_counter()
             if now < target:
@@ -117,15 +94,13 @@ def main():
                 slow_ticks += 1  # 來不及，落後超過一個 tick（只在錄製時在意）
 
             # ---- 處理開始/結束（邊緣觸發）----
-            if ctrl.start_req:
-                ctrl.start_req = False
+            if ctrl.take("start"):
                 if not recording:
                     buf = _empty_buf()
                     recording = True
                     arm_t = time.perf_counter()
                     print("● 開始錄這場戰鬥（打完按 F8）")
-            if ctrl.stop_req:
-                ctrl.stop_req = False
+            if ctrl.take("save"):
                 if recording:
                     recording = False
                     events = [e for e in hook.events if e[0] >= arm_t]
@@ -160,7 +135,7 @@ def main():
                 n_saved += 1
         hook.stop()
         rx.stop()
-        ctrl.stop()
+        ctrl.stop_listening()
         print(f"\n結束。共存了 {n_saved} 個 episode 到 {config.DATA_DIR}/")
         if slow_ticks > i * 0.05:
             print(f"⚠ 有 {slow_ticks}/{i} 個 tick 來不及（擷取太慢）。"

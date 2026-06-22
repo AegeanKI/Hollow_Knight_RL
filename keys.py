@@ -4,7 +4,7 @@ from ctypes import wintypes
 
 import numpy as np
 
-from config import ACTION_KEYS, N_ACTIONS
+from config import ACTION_KEYS, N_ACTIONS, WINDOW_TITLE
 
 # 鍵名 -> index 的反查表
 KEY_INDEX = {k: i for i, k in enumerate(ACTION_KEYS)}
@@ -85,6 +85,5 @@ def _find_window_contains(substr: str):
 
 
 if __name__ == "__main__":
-    from config import WINDOW_TITLE
     region = find_window_region(WINDOW_TITLE)
     print(f"視窗 '{WINDOW_TITLE}' 區域: {region}")

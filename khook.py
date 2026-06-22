@@ -12,6 +12,7 @@ import time
 from pynput import keyboard
 
 from config import ACTION_KEYS
+from controls import ControlKeys
 
 # 從 config 的動作鍵自動推導要監聽哪些鍵（新增/換鍵不用動這支）。
 # 特殊鍵（方向鍵）走 pynput.Key；單字元鍵走 .char。
@@ -75,22 +76,14 @@ class KeyboardHook:
 
 
 if __name__ == "__main__":
-    # 簡單自測：按鍵會即時印出目前按住的集合，Esc 結束。
+    # 簡單自測：按鍵會即時印出目前按住的集合，F10 結束。
     hook = KeyboardHook()
     hook.start()
-    print(f"監聽中，按 {ACTION_KEYS} 看反應，按 Esc 結束。")
+    ctrl = ControlKeys().start()
+    print(f"監聽中，按 {ACTION_KEYS} 看反應，按 F10 結束。")
     try:
-        from pynput import keyboard as kb
-        stop = {"v": False}
-
-        def on_esc(key):
-            if key == kb.Key.esc:
-                stop["v"] = True
-
-        l2 = kb.Listener(on_press=on_esc)
-        l2.start()
         last = None
-        while not stop["v"]:
+        while not ctrl.stop:
             s = hook.sample()
             if s != last:
                 print("按住:", sorted(s))

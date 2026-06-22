@@ -1,14 +1,22 @@
 """PPO 微調：從 BC 權重出發，在真實大黃蜂戰鬥中學習。
 
-- 動作隨機取樣（探索），每 EPISODES_PER_UPDATE 場（預設 4）做一次 PPO 更新。
+- 動作隨機取樣（探索），每 EPISODES_PER_UPDATE 場（預設 8）做一次 PPO 更新。
 - 更新發生在 episode 之間（人在雕像大廳、不在戰鬥），不搶即時操作的 GPU。
 - F10 = 安全停止（會存檔後結束）。不用 Esc，因為 HK 內看設定要按 Esc。
 - F9 = 暫停/繼續（在 episode 之間生效，會放開所有輸入，方便檢查映射/難度/護符）。
 
+穩定性與訊號品質：
+- 自動開場失敗不會讓訓練崩潰：env.reset() 退避重試，連續失敗就跳過該場。
+- 遙測健康度：每場統計掉包率，>50% 視為 reward 不可信 -> 整場丟棄不納入更新；
+  本輪平均掉包 >20% 會印警告（去查 reward mod / UDP）。
+
 Checkpoint（都在 checkpoints/，內含 模型+optimizer+更新次數+場數，接續無縫）：
   rl_latest.pt   每次更新滾動覆蓋（最新）
-  rl_best.pt     平均傷害創新高才覆蓋（最佳）
+  rl_best.pt     **由決定性 eval 的平均傷害**創新高才覆蓋（--eval-every 0 時退回用訓練 avg_dmg）
   rl_uXXXX.pt    每 --snapshot-every 次更新存一個「不覆蓋」的編號快照（歷史回溯點）
+
+指標：每次 update 寫一列到 logs/metrics.csv（train/eval 傷害、勝場、loss、entropy、kl、
+掉包率），方便畫曲線/跨 run 比較；判斷是否進步看這條曲線，不看單點。
 
 用法：
   python train_rl.py                       # 全新：從 bc.pt 初始化開始
@@ -17,6 +25,7 @@ Checkpoint（都在 checkpoints/，內含 模型+optimizer+更新次數+場數�
   python train_rl.py --ckpt rl_u0020.pt    # 從第 20 次更新的快照接續
   python train_rl.py --ckpt D:/some/dir/xxx.pt # 也吃完整路徑（--ckpt 優先於 --resume）
   python train_rl.py --snapshot-every 5    # 每 5 次更新存一個編號快照（0=關閉）
+  python train_rl.py --eval-every 5 --eval-episodes 5  # 評估頻率/場數（rl_best 由此選；0=關閉 eval）
 """
 import argparse
 import csv
@@ -25,10 +34,10 @@ import time
 
 import numpy as np
 import torch
-from pynput import keyboard
 
 import config
 from ac_model import ActorCritic
+from controls import ControlKeys
 from env import HollowKnightEnv
 from ppo import RolloutBuffer, ppo_update
 
@@ -65,17 +74,17 @@ def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg):
                 "update_i": update_i, "ep_i": ep_i, "best_dmg": best_dmg}, path)
 
 
-def run_eval(env, ac, device, n_eps, stop):
+def run_eval(env, ac, device, n_eps, should_stop):
     """跑 n_eps 場決定性（不取樣）戰鬥，回傳 (results, damages)。"""
     res, dmgs = [], []
     for _ in range(n_eps):
-        if stop["v"]:
+        if should_stop():
             break
-        obs = env.reset(should_stop=lambda: stop["v"])
+        obs = env.reset(should_stop=should_stop)
         if obs is None:                          # reset 失敗/被中止 -> 跳過這場 eval
             break
         boss0, last_boss, done, info = None, -1, False, {}
-        while not done and not stop["v"]:
+        while not done and not should_stop():
             ot = torch.from_numpy(obs).to(device)
             a, _, _ = ac.act(ot, deterministic=True)
             obs, r, term, trunc, info = env.step(a)
@@ -90,7 +99,7 @@ def run_eval(env, ac, device, n_eps, stop):
     return res, dmgs
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--resume", action="store_true", help="接續 rl_latest.pt")
     ap.add_argument("--ckpt", type=str, default=None,
@@ -107,7 +116,11 @@ def main():
     ap.add_argument("--eval-episodes", type=int, default=5)
     ap.add_argument("--input", choices=["keyboard", "gamepad"], default=config.INPUT_BACKEND,
                     help="輸入後端：keyboard(需焦點) 或 gamepad(虛擬手把，背景可、解放鍵盤)")
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
 
     os.makedirs("logs", exist_ok=True)
     logf = open(LOG_PATH, "a", encoding="utf-8")
@@ -145,18 +158,7 @@ def main():
         ac.init_from_bc(bc["model"])
         log(f"從 BC 初始化 (macroF1 {bc['macroF1']:.3f})")
 
-    stop = {"v": False}
-    pause = {"v": False}
-
-    def on_press(k):
-        if k == keyboard.Key.f10:
-            stop["v"] = True
-        elif k == keyboard.Key.f9:
-            pause["v"] = not pause["v"]
-            print("⏸ 收到暫停請求，本場結束回大廳後暫停。" if pause["v"]
-                  else "▶ 取消暫停。")
-
-    keyboard.Listener(on_press=on_press).start()
+    ctrl = ControlKeys().start()
 
     print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 安全停止；F9 暫停/繼續）")
     for i in range(5, 0, -1):
@@ -166,30 +168,24 @@ def main():
     log(f"輸入後端：{args.input}")
     csvf, csvw = _open_csv()
     try:
-        while update_i < args.updates and not stop["v"]:
+        while update_i < args.updates and not ctrl.stop:
             buf = RolloutBuffer()
             ep_summ = []
             drops = []
             for _ in range(args.episodes_per_update):
-                if stop["v"]:
+                if ctrl.stop:                        # 上一場跑完就收到停止 -> 乾淨退出
                     break
                 # 暫停點（episode 之間）：放開所有輸入，等使用者檢查遊戲設定後再續
-                if pause["v"]:
-                    env.act.release_all()
-                    log("⏸ 訓練已暫停。可在遊戲內檢查映射/難度/護符。再按 F9 繼續，F10 停止。")
-                    while pause["v"] and not stop["v"]:
-                        time.sleep(0.1)
-                    if not stop["v"]:
-                        log("▶ 繼續訓練。")
-                if stop["v"]:
+                ctrl.wait_while_paused(on_pause=env.act.release_all, log=log)
+                if ctrl.stop:                        # 暫停等待中按了 F10 -> 別再開下一場
                     break
-                obs = env.reset(should_stop=lambda: stop["v"])
+                obs = env.reset(should_stop=ctrl.should_stop)
                 if obs is None:                      # B3：自動開場失敗/被中止 -> 跳過本場，不崩
                     continue
                 boss0, last_boss = None, -1
                 done, ep_r, steps, info = False, 0.0, 0, {}
                 ep_trans = []                        # 先暫存本場 transitions，場末再決定收不收
-                while not done and not stop["v"]:
+                while not done and not ctrl.stop:
                     ot = torch.from_numpy(obs).to(device)
                     action, logp, value = ac.act(ot)
                     obs2, r, term, trunc, info = env.step(action)
@@ -219,7 +215,7 @@ def main():
                     f"reward={ep_r:6.2f} steps={steps}{flag}")
 
             if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
-                if stop["v"]:
+                if ctrl.stop:
                     break
                 log("  ⚠ 本輪沒有可用 episode（開場失敗或遙測全壞），略過此次更新。")
                 continue
@@ -243,8 +239,9 @@ def main():
 
             # ---- B6：rl_best 由「決定性評估的傷害」選出，而非訓練取樣的 avg_dmg ----
             eval_dmg = eval_max = eval_wins = eval_n = None
-            if args.eval_every > 0 and update_i % args.eval_every == 0 and not stop["v"]:
-                res, dmgs = run_eval(env, ac, device, args.eval_episodes, stop)
+            if args.eval_every > 0 and update_i % args.eval_every == 0 and not ctrl.stop:
+                res, dmgs = run_eval(env, ac, device, args.eval_episodes,
+                                     should_stop=ctrl.should_stop)
                 if dmgs:
                     eval_dmg, eval_max = float(np.mean(dmgs)), float(np.max(dmgs))
                     eval_wins, eval_n = sum(1 for r in res if r == "win"), len(res)

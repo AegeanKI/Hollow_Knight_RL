@@ -27,10 +27,14 @@ def hold(act, keys, seconds, label):
     time.sleep(0.3)
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", choices=["keyboard", "gamepad"], default=config.INPUT_BACKEND)
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
 
     print(f"輸入後端: {args.input}")
     act = make_actuator(args.input)

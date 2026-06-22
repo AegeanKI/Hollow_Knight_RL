@@ -47,12 +47,16 @@ def evaluate(model, loader, device, thr=0.5):
     return loss_sum / max(nb, 1), prec, rec, f1
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train_files, val_files = split_files()

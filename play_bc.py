@@ -9,6 +9,7 @@
   3. 倒數 5 秒內點一下遊戲視窗讓它取得焦點，AI 就會開始打。
   F10 = 停止（會放開所有鍵）；F9 = 暫停/繼續（會放開輸入，可開 HK 選單檢查設定）。
 """
+import argparse
 import time
 
 import numpy as np
@@ -17,12 +18,12 @@ import torch
 import config
 import autostart
 from capture import Capturer
+from controls import ControlKeys
 from inputs import make_actuator
 from model import PolicyNet
 from obs import FrameStacker
 from keys import vec_to_keys
 from telemetry import TelemetryReceiver
-from pynput import keyboard
 
 
 def load_model(device):
@@ -33,13 +34,16 @@ def load_model(device):
     return model
 
 
-def main():
-    import argparse
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threshold", type=float, default=0.5, help="按鍵機率門檻")
     ap.add_argument("--no-autostart", action="store_true", help="跳過自動開場，手動進戰鬥")
     ap.add_argument("--input", choices=["keyboard", "gamepad"], default=config.INPUT_BACKEND)
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
 
     print(f"輸入後端: {args.input}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -50,17 +54,7 @@ def main():
     rx = TelemetryReceiver()
     rx.start()
 
-    stop = {"v": False}
-    pause = {"v": False}
-
-    def on_press(k):
-        if k == keyboard.Key.f10:
-            stop["v"] = True
-        elif k == keyboard.Key.f9:
-            pause["v"] = not pause["v"]
-            print("⏸ 已暫停。" if pause["v"] else "▶ 繼續。")
-
-    keyboard.Listener(on_press=on_press).start()
+    ctrl = ControlKeys().start()
 
     print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 停止；F9 暫停/繼續）")
     for i in range(5, 0, -1):
@@ -81,15 +75,10 @@ def main():
     result = None
     print("AI 開打。")
     try:
-        while not stop["v"]:
-            if pause["v"]:
-                act.release_all()
-                print("⏸ 已暫停。可開 HK 選單檢查映射/難度/護符。再按 F9 繼續，F10 停止。")
-                while pause["v"] and not stop["v"]:
-                    time.sleep(0.1)
-                if stop["v"]:
+        while not ctrl.stop:
+            if ctrl.wait_while_paused(on_pause=act.release_all):
+                if ctrl.stop:
                     break
-                print("▶ 繼續。")
                 start = time.perf_counter() - i * dt  # 重設節拍基準，避免暫停後爆衝
             target = start + i * dt
             now = time.perf_counter()
