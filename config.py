@@ -26,7 +26,7 @@ INPUT_BACKEND = "gamepad"
 ACTIONS = list(Action)                       # 依定義順序，決定 MultiBinary index
 ACTION_KEYS = [a.value for a in ACTIONS]     # 對應的實體鍵（同順序）
 ACTION_NAMES = [a.name for a in ACTIONS]     # 語意名稱（給 log/檢視顯示）
-KEY_TO_ACTION = {a.value: a for a in ACTIONS}  # 實體鍵 -> Action 反查
+KEY_INDEX = {k: i for i, k in enumerate(ACTION_KEYS)}  # 實體鍵 -> MultiBinary index
 N_ACTIONS = len(ACTIONS)
 
 # ---- 時序 --------------------------------------------------------------------
@@ -34,6 +34,8 @@ N_ACTIONS = len(ACTIONS)
 # 15Hz = 每 66.7ms 一個決策。先用 15，之後可調。
 TICK_HZ = 15
 TICK_DT = 1.0 / TICK_HZ
+# 互動腳本（訓練/評估/推論/測試）開始前的倒數秒數，讓你切換到遊戲視窗取得焦點
+START_COUNTDOWN_SEC = 5
 
 # ---- 畫面擷取 ----------------------------------------------------------------
 # 遊戲視窗標題（用來自動定位擷取區域）。找不到就用 CAPTURE_REGION 後備。
@@ -71,11 +73,17 @@ TELEMETRY_HOST = "127.0.0.1"
 # 注意：51789 落在 Windows UDP 排除範圍(Hyper-V/WSL 動態保留 49152–65535 內)會導致
 # bind 出現 WinError 10013。改用 < 49152 的固定埠，永遠不會被動態保留。
 TELEMETRY_PORT = 48789
+# 遙測新鮮度門檻：sample 距今超過這秒數就視為「沒有有效遙測」（reward/狀態判斷共用）
+TELE_FRESH_SEC = 1.0
 
 # ---- 資料存放 ----------------------------------------------------------------
 DATA_DIR = "data"          # 錄製的 demo 存這裡
 EPISODE_PREFIX = "ep"      # 檔名前綴
 CKPT_DIR = "checkpoints"   # 模型權重存這裡
+# checkpoint 檔名（都在 CKPT_DIR 底下；多個腳本共用，避免各自硬寫）
+BC_CKPT = "bc.pt"              # 階段1 BC 最佳模型
+RL_LATEST_CKPT = "rl_latest.pt"   # 階段2 RL 最新（每次更新覆蓋）
+RL_BEST_CKPT = "rl_best.pt"       # 階段2 RL 最佳（由決定性 eval 選）
 
 # ---- 網路輸入 ----------------------------------------------------------------
 # 進網路前把 96x96 觀測再降到 NET_SIZE，並疊 FRAME_STACK 張連續幀（給速度/方向資訊）。

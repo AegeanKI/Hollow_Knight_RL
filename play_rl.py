@@ -31,7 +31,8 @@ def main():
 
     print(f"輸入後端: {args.input}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    path = os.path.join(config.CKPT_DIR, "rl_latest.pt" if args.latest else "rl_best.pt")
+    path = os.path.join(config.CKPT_DIR,
+                        config.RL_LATEST_CKPT if args.latest else config.RL_BEST_CKPT)
     ck = torch.load(path, map_location=device)
     ac = ActorCritic().to(device).eval()
     ac.load_state_dict(ck["model"])
@@ -39,8 +40,8 @@ def main():
 
     ctrl = ControlKeys().start()
 
-    print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 中止；F9 暫停/繼續）")
-    for i in range(5, 0, -1):
+    print(f"{config.START_COUNTDOWN_SEC} 秒後開始，請點一下遊戲視窗取得焦點...（F10 中止；F9 暫停/繼續）")
+    for i in range(config.START_COUNTDOWN_SEC, 0, -1):
         print(f"  {i}..."); time.sleep(1)
 
     env = HollowKnightEnv(backend=args.input)

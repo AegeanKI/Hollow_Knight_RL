@@ -27,10 +27,10 @@ from telemetry import TelemetryReceiver
 
 
 def load_model(device):
-    ckpt = torch.load(f"{config.CKPT_DIR}/bc.pt", map_location=device)
+    ckpt = torch.load(f"{config.CKPT_DIR}/{config.BC_CKPT}", map_location=device)
     model = PolicyNet().to(device).eval()
     model.load_state_dict(ckpt["model"])
-    print(f"載入 {config.CKPT_DIR}/bc.pt  (epoch {ckpt['epoch']}, macroF1 {ckpt['macroF1']:.3f})")
+    print(f"載入 {config.CKPT_DIR}/{config.BC_CKPT}  (epoch {ckpt['epoch']}, macroF1 {ckpt['macroF1']:.3f})")
     return model
 
 
@@ -56,8 +56,8 @@ def main():
 
     ctrl = ControlKeys().start()
 
-    print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 停止；F9 暫停/繼續）")
-    for i in range(5, 0, -1):
+    print(f"{config.START_COUNTDOWN_SEC} 秒後開始，請點一下遊戲視窗取得焦點...（F10 停止；F9 暫停/繼續）")
+    for i in range(config.START_COUNTDOWN_SEC, 0, -1):
         print(f"  {i}..."); time.sleep(1)
 
     # 自動開場：開菜單 -> 選調諧級 -> 等開打
@@ -93,7 +93,7 @@ def main():
 
             # 用遙測判斷本場是否結束
             tele, age = rx.sample()
-            if tele is not None and age < 1.0:
+            if tele is not None and age < config.TELE_FRESH_SEC:
                 result = monitor.update(tele)
                 if result is not None:
                     break

@@ -32,15 +32,15 @@ def main():
 
     print(f"輸入後端: {args.input}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt = torch.load(f"{config.CKPT_DIR}/bc.pt", map_location=device)
+    ckpt = torch.load(f"{config.CKPT_DIR}/{config.BC_CKPT}", map_location=device)
     model = PolicyNet().to(device).eval()
     model.load_state_dict(ckpt["model"])
     print(f"載入 BC 模型 (macroF1 {ckpt['macroF1']:.3f})")
 
     ctrl = ControlKeys().start()
 
-    print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 中止；F9 暫停/繼續）")
-    for i in range(5, 0, -1):
+    print(f"{config.START_COUNTDOWN_SEC} 秒後開始，請點一下遊戲視窗取得焦點...（F10 中止；F9 暫停/繼續）")
+    for i in range(config.START_COUNTDOWN_SEC, 0, -1):
         print(f"  {i}..."); time.sleep(1)
 
     env = HollowKnightEnv(backend=args.input)

@@ -130,7 +130,7 @@ def wait_for_hall(cap, rx, timeout=15.0):
     t0 = time.perf_counter()
     while time.perf_counter() - t0 < timeout:
         tele, age = rx.sample()
-        scene = tele.get("scene") if (tele is not None and age < 1.0) else None
+        scene = tele.get("scene") if (tele is not None and age < config.TELE_FRESH_SEC) else None
         bright = float(cap.grab_obs().mean())
         if scene == config.HALL_SCENE and bright < WHITE_THRESH:
             _wait_settle(cap, timeout=3.0)
@@ -180,7 +180,7 @@ def wait_fight_start(cap, rx, timeout=START_TIMEOUT):
     saw_white = False
     while time.perf_counter() - t0 < timeout:
         tele, age = rx.sample()
-        if tele is not None and age < 1.0:
+        if tele is not None and age < config.TELE_FRESH_SEC:
             if tele.get("scene") in config.HORNET_SCENES and tele.get("boss_present"):
                 print(f"  [開打] 遙測確認：scene={tele.get('scene')}, boss 已出現")
                 return True

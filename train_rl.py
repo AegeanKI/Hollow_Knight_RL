@@ -45,8 +45,8 @@ from ppo import RolloutBuffer, ppo_update
 # 固定輸入尺寸 -> 讓 cudnn 選好演算法（也避開 CUDNN_STATUS_NOT_SUPPORTED 的 plan warning）
 torch.backends.cudnn.benchmark = True
 
-LATEST = os.path.join(config.CKPT_DIR, "rl_latest.pt")
-BEST = os.path.join(config.CKPT_DIR, "rl_best.pt")
+LATEST = os.path.join(config.CKPT_DIR, config.RL_LATEST_CKPT)
+BEST = os.path.join(config.CKPT_DIR, config.RL_BEST_CKPT)
 LOG_PATH = os.path.join("logs", "train_rl.log")
 CSV_PATH = os.path.join("logs", "metrics.csv")   # C8：每次 update 一列，方便畫曲線/比較
 
@@ -194,14 +194,14 @@ def main():
         update_i, ep_i, best_dmg = ck["update_i"], ck["ep_i"], ck["best_dmg"]
         log(f"接續訓練 from {resume_path}：update={update_i} ep={ep_i} best_dmg={best_dmg:.0f}")
     else:
-        bc = torch.load(os.path.join(config.CKPT_DIR, "bc.pt"), map_location=device)
+        bc = torch.load(os.path.join(config.CKPT_DIR, config.BC_CKPT), map_location=device)
         ac.init_from_bc(bc["model"])
         log(f"從 BC 初始化 (macroF1 {bc['macroF1']:.3f})")
 
     ctrl = ControlKeys().start()
 
-    print("5 秒後開始，請點一下遊戲視窗取得焦點...（F10 安全停止；F9 暫停/繼續）")
-    for i in range(5, 0, -1):
+    print(f"{config.START_COUNTDOWN_SEC} 秒後開始，請點一下遊戲視窗取得焦點...（F10 安全停止；F9 暫停/繼續）")
+    for i in range(config.START_COUNTDOWN_SEC, 0, -1):
         print(f"  {i}..."); time.sleep(1)
 
     env = HollowKnightEnv(backend=args.input)

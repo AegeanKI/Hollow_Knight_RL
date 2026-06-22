@@ -74,7 +74,7 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     os.makedirs(config.CKPT_DIR, exist_ok=True)
-    ckpt_path = os.path.join(config.CKPT_DIR, "bc.pt")
+    ckpt_path = os.path.join(config.CKPT_DIR, config.BC_CKPT)
     best_f1 = -1.0
 
     for ep in range(1, args.epochs + 1):

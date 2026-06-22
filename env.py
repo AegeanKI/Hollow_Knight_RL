@@ -62,7 +62,7 @@ class HollowKnightEnv:
     # ---- 工具 ----
     def _read_tele(self):
         tele, age = self.rx.sample()
-        if tele is not None and age < 1.0:
+        if tele is not None and age < config.TELE_FRESH_SEC:
             return tele
         return None
 

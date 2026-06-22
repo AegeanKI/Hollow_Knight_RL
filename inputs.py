@@ -29,7 +29,7 @@ class Actuator:
         self._held = set(target)
 
     def apply_vec(self, vec):
-        """吃 MultiBinary(10) 向量。"""
+        """吃 MultiBinary(11) 向量。"""
         self.apply_keys(vec_to_keys(vec))
 
     def release_all(self):

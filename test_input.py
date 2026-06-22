@@ -39,9 +39,9 @@ def main():
 
     print(f"輸入後端: {args.input}")
     act = make_actuator(args.input)
-    print("5 秒後開始" + ("..." if args.input == "gamepad"
+    print(f"{config.START_COUNTDOWN_SEC} 秒後開始" + ("..." if args.input == "gamepad"
                           else "，請點一下遊戲視窗讓它取得焦點..."))
-    for i in range(5, 0, -1):
+    for i in range(config.START_COUNTDOWN_SEC, 0, -1):
         print(f"  {i}...")
         time.sleep(1)
 

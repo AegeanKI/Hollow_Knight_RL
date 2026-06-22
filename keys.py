@@ -4,14 +4,11 @@ from ctypes import wintypes
 
 import numpy as np
 
-from config import ACTION_KEYS, N_ACTIONS, WINDOW_TITLE
-
-# 鍵名 -> index 的反查表
-KEY_INDEX = {k: i for i, k in enumerate(ACTION_KEYS)}
+from config import ACTION_KEYS, KEY_INDEX, N_ACTIONS, WINDOW_TITLE
 
 
 def keys_to_vec(pressed) -> np.ndarray:
-    """一組「目前按住的鍵名」-> MultiBinary(10) 向量 (uint8)。"""
+    """一組「目前按住的鍵名」-> MultiBinary(11) 向量 (uint8)。"""
     vec = np.zeros(N_ACTIONS, dtype=np.uint8)
     for k in pressed:
         i = KEY_INDEX.get(k)
@@ -21,7 +18,7 @@ def keys_to_vec(pressed) -> np.ndarray:
 
 
 def vec_to_keys(vec) -> set:
-    """MultiBinary(10) 向量 -> 按住的鍵名集合。"""
+    """MultiBinary(11) 向量 -> 按住的鍵名集合。"""
     return {ACTION_KEYS[i] for i in range(N_ACTIONS) if vec[i]}
 
 
