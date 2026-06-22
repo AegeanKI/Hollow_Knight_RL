@@ -63,7 +63,9 @@ def main():
                     print("▶ 繼續。")
             if stop["v"]:
                 break
-            obs = env.reset()
+            obs = env.reset(should_stop=lambda: stop["v"])
+            if obs is None:                      # 自動開場失敗/被中止
+                continue
             total_r, steps, done = 0.0, 0, False
             t0 = time.perf_counter()
             while not done and not stop["v"]:

@@ -63,7 +63,9 @@ def main():
                     print("▶ 繼續。")
             if stop["v"]:
                 break
-            obs = env.reset()
+            obs = env.reset(should_stop=lambda: stop["v"])
+            if obs is None:                      # 自動開場失敗/被中止
+                continue
             done, steps = False, 0
             while not done and not stop["v"]:
                 ot = torch.from_numpy(obs).to(device)

@@ -19,6 +19,7 @@ Checkpoint（都在 checkpoints/，內含 模型+optimizer+更新次數+場數�
   python train_rl.py --snapshot-every 5    # 每 5 次更新存一個編號快照（0=關閉）
 """
 import argparse
+import csv
 import os
 import time
 
@@ -37,6 +38,26 @@ torch.backends.cudnn.benchmark = True
 LATEST = os.path.join(config.CKPT_DIR, "rl_latest.pt")
 BEST = os.path.join(config.CKPT_DIR, "rl_best.pt")
 LOG_PATH = os.path.join("logs", "train_rl.log")
+CSV_PATH = os.path.join("logs", "metrics.csv")   # C8：每次 update 一列，方便畫曲線/比較
+
+# B4 遙測健康門檻
+TELE_DROP_WARN = 0.20       # 掉包率超過 -> 警告（訊號開始不可信）
+TELE_DROP_DISCARD = 0.50    # 掉包率超過 -> 整場丟棄不納入更新（reward 已不可信）
+
+CSV_COLS = ["update", "ep", "train_avg_dmg", "train_wins", "train_eps_used",
+            "pi_loss", "vf_loss", "entropy", "kl", "tele_drop_mean",
+            "eval_avg_dmg", "eval_max_dmg", "eval_wins", "eval_eps"]
+
+
+def _open_csv():
+    """開 metrics.csv（append）；檔案不存在就先寫表頭。回傳 (file, writer)。"""
+    is_new = not os.path.exists(CSV_PATH)
+    f = open(CSV_PATH, "a", newline="", encoding="utf-8")
+    w = csv.DictWriter(f, fieldnames=CSV_COLS)
+    if is_new:
+        w.writeheader()
+        f.flush()
+    return f, w
 
 
 def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg):
@@ -50,8 +71,10 @@ def run_eval(env, ac, device, n_eps, stop):
     for _ in range(n_eps):
         if stop["v"]:
             break
-        obs = env.reset()
-        boss0, last_boss, done = None, -1, False
+        obs = env.reset(should_stop=lambda: stop["v"])
+        if obs is None:                          # reset 失敗/被中止 -> 跳過這場 eval
+            break
+        boss0, last_boss, done, info = None, -1, False, {}
         while not done and not stop["v"]:
             ot = torch.from_numpy(obs).to(device)
             a, _, _ = ac.act(ot, deterministic=True)
@@ -60,6 +83,8 @@ def run_eval(env, ac, device, n_eps, stop):
             if boss0 is None and info["boss_hp_raw"] >= 0:
                 boss0 = info["boss_hp_raw"]
             last_boss = info["boss_hp_raw"]
+        if not info:                             # 0 步（一進去就被 stop）
+            break
         res.append(info["result"])
         dmgs.append((boss0 - last_boss) if boss0 is not None else 0)
     return res, dmgs
@@ -77,9 +102,9 @@ def main():
     ap.add_argument("--ent-coef", type=float, default=0.0005, help="熵獎勵係數（太大策略會變隨機）")
     ap.add_argument("--episodes-per-update", type=int, default=config.EPISODES_PER_UPDATE,
                     help="每次更新收集幾場（越大梯度越穩）")
-    ap.add_argument("--eval-every", type=int, default=0,
-                    help="每幾次更新跑一次決定性評估（0=關閉）")
-    ap.add_argument("--eval-episodes", type=int, default=2)
+    ap.add_argument("--eval-every", type=int, default=5,
+                    help="每幾次更新跑一次決定性評估（0=關閉）。rl_best 由此評估的傷害選出。")
+    ap.add_argument("--eval-episodes", type=int, default=5)
     ap.add_argument("--input", choices=["keyboard", "gamepad"], default=config.INPUT_BACKEND,
                     help="輸入後端：keyboard(需焦點) 或 gamepad(虛擬手把，背景可、解放鍵盤)")
     args = ap.parse_args()
@@ -139,10 +164,12 @@ def main():
 
     env = HollowKnightEnv(backend=args.input)
     log(f"輸入後端：{args.input}")
+    csvf, csvw = _open_csv()
     try:
         while update_i < args.updates and not stop["v"]:
             buf = RolloutBuffer()
             ep_summ = []
+            drops = []
             for _ in range(args.episodes_per_update):
                 if stop["v"]:
                     break
@@ -156,9 +183,12 @@ def main():
                         log("▶ 繼續訓練。")
                 if stop["v"]:
                     break
-                obs = env.reset()
+                obs = env.reset(should_stop=lambda: stop["v"])
+                if obs is None:                      # B3：自動開場失敗/被中止 -> 跳過本場，不崩
+                    continue
                 boss0, last_boss = None, -1
-                done, ep_r, steps = False, 0.0, 0
+                done, ep_r, steps, info = False, 0.0, 0, {}
+                ep_trans = []                        # 先暫存本場 transitions，場末再決定收不收
                 while not done and not stop["v"]:
                     ot = torch.from_numpy(obs).to(device)
                     action, logp, value = ac.act(ot)
@@ -166,44 +196,92 @@ def main():
                     done = term or trunc
                     # 超時(truncation)非真終局：用最後狀態 value bootstrap，避免低估結尾
                     boot = ac.value(torch.from_numpy(obs2).to(device)) if (trunc and not term) else 0.0
-                    buf.add(obs, action, logp, r, value, float(done), float(term), boot)
+                    ep_trans.append((obs, action, logp, r, value, float(done), float(term), boot))
                     obs = obs2; ep_r += r; steps += 1
                     if boss0 is None and info["boss_hp_raw"] >= 0:
                         boss0 = info["boss_hp_raw"]
                     last_boss = info["boss_hp_raw"]
+                if steps == 0:                       # 0 步（剛 reset 完就被 stop）
+                    continue
                 ep_i += 1
                 dmg = (boss0 - last_boss) if boss0 is not None else 0
-                ep_summ.append((info["result"], dmg, ep_r, steps))
+                drop = info.get("tele_drop", 0.0)
+                drops.append(drop)
+                # B4：遙測掉太兇 -> reward 訊號不可信，整場丟棄不納入更新（但仍記錄）
+                healthy = drop <= TELE_DROP_DISCARD
+                if healthy:
+                    for tr in ep_trans:
+                        buf.add(*tr)
+                flag = ("" if drop <= TELE_DROP_WARN
+                        else f"  ⚠遙測掉包{drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
+                ep_summ.append((info["result"], dmg, ep_r, steps, healthy))
                 log(f"  EP{ep_i}: {str(info['result']):>5} dmg={dmg:4.0f} "
-                    f"reward={ep_r:6.2f} steps={steps}")
+                    f"reward={ep_r:6.2f} steps={steps}{flag}")
 
-            if len(buf) == 0:
-                break
+            if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
+                if stop["v"]:
+                    break
+                log("  ⚠ 本輪沒有可用 episode（開場失敗或遙測全壞），略過此次更新。")
+                continue
             st = ppo_update(ac, opt, buf, device, ent_coef=args.ent_coef)
             update_i += 1
-            avg_dmg = float(np.mean([d for _, d, _, _ in ep_summ]))
-            wins = sum(1 for r, _, _, _ in ep_summ if r == "win")
-            log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f} wins={wins}/{len(ep_summ)} "
-                f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} kl={st['kl']:.3f}")
+            used = [e for e in ep_summ if e[4]]      # 真正納入更新的（遙測健康）場
+            avg_dmg = float(np.mean([d for _, d, _, _, _ in used])) if used else 0.0
+            wins = sum(1 for r, _, _, _, _ in used if r == "win")
+            drop_mean = float(np.mean(drops)) if drops else 0.0
+            log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f} wins={wins}/{len(used)} "
+                f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} "
+                f"kl={st['kl']:.3f} tele_drop={drop_mean:.0%}")
+            if drop_mean > TELE_DROP_WARN:
+                log(f"  ⚠ 本輪平均遙測掉包 {drop_mean:.0%}，請檢查 reward mod / UDP 是否正常。")
 
             save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
-            if avg_dmg > best_dmg:
-                best_dmg = avg_dmg
-                save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg)
-                log(f"  ★ 新最佳平均傷害 {best_dmg:.0f}，存 rl_best.pt")
             if args.snapshot_every > 0 and update_i % args.snapshot_every == 0:
                 snap = os.path.join(config.CKPT_DIR, f"rl_u{update_i:04d}.pt")
                 save_ckpt(snap, ac, opt, update_i, ep_i, best_dmg)
                 log(f"  保存快照 {snap}")
-            # 定期決定性評估
+
+            # ---- B6：rl_best 由「決定性評估的傷害」選出，而非訓練取樣的 avg_dmg ----
+            eval_dmg = eval_max = eval_wins = eval_n = None
             if args.eval_every > 0 and update_i % args.eval_every == 0 and not stop["v"]:
                 res, dmgs = run_eval(env, ac, device, args.eval_episodes, stop)
-                ew = sum(1 for r in res if r == "win")
-                log(f"  [EVAL] avg_dmg={np.mean(dmgs):.0f} wins={ew}/{len(res)} results={res}")
+                if dmgs:
+                    eval_dmg, eval_max = float(np.mean(dmgs)), float(np.max(dmgs))
+                    eval_wins, eval_n = sum(1 for r in res if r == "win"), len(res)
+                    log(f"  [EVAL] avg_dmg={eval_dmg:.0f} max={eval_max:.0f} "
+                        f"wins={eval_wins}/{eval_n} results={res}")
+                    if eval_dmg > best_dmg:
+                        best_dmg = eval_dmg
+                        save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg)
+                        log(f"  ★ 新最佳(eval)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
+                        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)  # 同步 latest 的 best 欄
+            elif args.eval_every == 0:
+                # 沒開 eval 的退路：退回用訓練 avg_dmg 維持 best（legacy 行為）
+                if avg_dmg > best_dmg:
+                    best_dmg = avg_dmg
+                    save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg)
+                    save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
+                    log(f"  ★ 新最佳(train)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
+
+            # ---- C8：每次 update 寫一列到 metrics.csv ----
+            csvw.writerow({
+                "update": update_i, "ep": ep_i,
+                "train_avg_dmg": round(avg_dmg, 1), "train_wins": wins,
+                "train_eps_used": len(used),
+                "pi_loss": round(st["pi_loss"], 4), "vf_loss": round(st["vf_loss"], 4),
+                "entropy": round(st["entropy"], 4), "kl": round(st["kl"], 4),
+                "tele_drop_mean": round(drop_mean, 4),
+                "eval_avg_dmg": "" if eval_dmg is None else round(eval_dmg, 1),
+                "eval_max_dmg": "" if eval_max is None else round(eval_max, 1),
+                "eval_wins": "" if eval_wins is None else eval_wins,
+                "eval_eps": "" if eval_n is None else eval_n,
+            })
+            csvf.flush()
     finally:
         env.close()
         save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
         log(f"已停止並存檔。update={update_i} ep={ep_i}")
+        csvf.close()
         logf.close()
 
 
