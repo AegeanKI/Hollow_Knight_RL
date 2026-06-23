@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 import config
+import curriculum
 from ac_model import ActorCritic
 from controls import ControlKeys
 from env import BossDamageTracker, HollowKnightEnv
@@ -49,6 +50,7 @@ def main():
         print(f"  {i}..."); time.sleep(1)
 
     env = HollowKnightEnv(backend=args.input)
+    curriculum.begin_eval()          # 評估固定 100% 滿血（不被自適應難度污染）
     dmgs, results = [], []
     try:
         for ep in range(1, args.episodes + 1):
@@ -75,6 +77,7 @@ def main():
             print(f"[EP {ep}] result={info['result']} dmg={dmg:.0f} "
                   f"boss剩={boss.last} steps={steps}")
     finally:
+        curriculum.end_eval()
         env.close()
 
     if dmgs:

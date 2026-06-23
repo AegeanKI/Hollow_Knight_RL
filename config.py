@@ -1,4 +1,6 @@
 """集中設定檔。所有模組共用，避免魔術數字散落各處。"""
+import os
+import tempfile
 from enum import Enum
 
 # ---- 動作空間 ----------------------------------------------------------------
@@ -75,6 +77,12 @@ TELEMETRY_HOST = "127.0.0.1"
 TELEMETRY_PORT = 48789
 # 遙測新鮮度門檻：sample 距今超過這秒數就視為「沒有有效遙測」（reward/狀態判斷共用）
 TELE_FRESH_SEC = 1.0
+
+# ---- 自適應難度 mod (HKCurriculum) 的檔案交握 -------------------------------
+# eval 前 Python 建立此旗標 -> mod 該場 boss 用 100% 滿血且不計入自適應；eval 後刪除。
+CURRICULUM_EVAL_FLAG = os.path.join(tempfile.gettempdir(), "hk_curriculum_eval.flag")
+# mod 每場寫出目前難度比例(0.6~1.0)，Python 讀來記進 metrics.csv（分辨「變強」vs「變簡單」）。
+CURRICULUM_SCALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_scale.txt")
 
 # ---- 資料存放 ----------------------------------------------------------------
 DATA_DIR = "data"          # 錄製的 demo 存這裡

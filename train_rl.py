@@ -37,6 +37,7 @@ import numpy as np
 import torch
 
 import config
+import curriculum
 from ac_model import ActorCritic
 from controls import ControlKeys
 from env import BossDamageTracker, HollowKnightEnv
@@ -56,13 +57,27 @@ TELE_DROP_DISCARD = 0.50    # 掉包率超過 -> 整場丟棄不納入更新（r
 
 CSV_COLS = ["update", "ep", "train_avg_dmg", "train_wins", "train_eps_used",
             "pi_loss", "vf_loss", "entropy", "kl", "tele_drop_mean",
-            "eval_avg_dmg", "eval_max_dmg", "eval_wins", "eval_eps"]
+            "eval_avg_dmg", "eval_max_dmg", "eval_wins", "eval_eps", "scale"]
 
 
 def _open_csv():
-    """開 metrics.csv（append）；檔案不存在就先寫表頭。回傳 (file, writer)。"""
-    is_new = not os.path.exists(CSV_PATH)
-    f = open(CSV_PATH, "a", newline="", encoding="utf-8")
+    """開 metrics.csv（append）；欄位變更時把舊檔改名成 .old 再開新檔。
+    舊檔被佔用（Excel/另一程序開著）導致改名失敗時，改寫到帶序號的新檔，避免訓練起不來。"""
+    path = CSV_PATH
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            header_match = f.readline().strip() == ",".join(CSV_COLS)
+        if not header_match:                                 # 欄位改過
+            try:
+                os.replace(path, path + ".old")              # 備份舊檔
+            except OSError:                                  # 舊檔被鎖，改寫不衝突的新檔
+                i = 1
+                while os.path.exists(f"{CSV_PATH}.{i}"):
+                    i += 1
+                path = f"{CSV_PATH}.{i}"
+                print(f"⚠ {CSV_PATH} 被佔用（Excel/另一程序開著？），指標改寫到 {path}")
+    is_new = not os.path.exists(path)
+    f = open(path, "a", newline="", encoding="utf-8")
     w = csv.DictWriter(f, fieldnames=CSV_COLS)
     if is_new:
         w.writeheader()
@@ -95,22 +110,28 @@ def eval_one_episode(env, ac, device, should_stop):
 
 
 def run_eval(env, ac, device, n_eps, should_stop):
-    """跑 n_eps 場決定性評估，回傳 (results, damages)。"""
-    res, dmgs = [], []
-    for _ in range(n_eps):
-        if should_stop():
-            break
-        ep = eval_one_episode(env, ac, device, should_stop)
-        if ep is None:                           # reset 失敗/被中止/0 步 -> 停止評估
-            break
-        result, dmg = ep
-        res.append(result)
-        dmgs.append(dmg)
-    return res, dmgs
+    """跑 n_eps 場決定性評估，回傳 (results, damages)。
+    全程設 curriculum eval 旗標 -> boss 固定 100% 滿血、不計入自適應難度。"""
+    curriculum.begin_eval()
+    try:
+        res, dmgs = [], []
+        for _ in range(n_eps):
+            if should_stop():
+                break
+            ep = eval_one_episode(env, ac, device, should_stop)
+            if ep is None:                       # reset 失敗/被中止/0 步 -> 停止評估
+                break
+            result, dmg = ep
+            res.append(result)
+            dmgs.append(dmg)
+        return res, dmgs
+    finally:
+        curriculum.end_eval()
 
 
 # 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
-EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop")
+# scale=這場實際打的難度（reset 後讀，mod 開場設定後到本場結束才會變）；mod 沒載入則 None
+EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale")
 
 
 def collect_one_episode(env, ac, device, should_stop):
@@ -120,6 +141,7 @@ def collect_one_episode(env, ac, device, should_stop):
     obs, _ = env.reset(should_stop=should_stop)
     if obs is None:                              # 自動開場失敗/被中止
         return None
+    scale = curriculum.read_scale()              # 這場實際打的難度（開場已定、本場固定）
     boss = BossDamageTracker()
     done, ep_r, steps, info = False, 0.0, 0, {}
     trans = []
@@ -136,7 +158,7 @@ def collect_one_episode(env, ac, device, should_stop):
     if steps == 0:                               # 0 步（剛 reset 完就被 stop）
         return None
     return EpisodeData(trans=trans, result=info["result"], dmg=boss.dmg,
-                       ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0))
+                       ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0), scale=scale)
 
 
 def parse_args():
@@ -212,6 +234,7 @@ def main():
             buf = RolloutBuffer()
             ep_summ = []
             drops = []
+            scales = []
             for _ in range(args.episodes_per_update):
                 if ctrl.stop:                        # 上一場跑完就收到停止 -> 乾淨退出
                     break
@@ -224,6 +247,7 @@ def main():
                     continue
                 ep_i += 1
                 drops.append(ep.drop)
+                scales.append(ep.scale)
                 # B4：遙測掉太兇 -> reward 訊號不可信，整場丟棄不納入更新（但仍記錄）
                 healthy = ep.drop <= TELE_DROP_DISCARD
                 if healthy:
@@ -232,8 +256,9 @@ def main():
                 flag = ("" if ep.drop <= TELE_DROP_WARN
                         else f"  ⚠遙測掉包{ep.drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
                 ep_summ.append((ep.result, ep.dmg, ep.ep_r, ep.steps, healthy))
+                scale_tag = f" scale={ep.scale:.2f}" if ep.scale is not None else ""
                 log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f} "
-                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{flag}")
+                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{flag}{scale_tag}")
 
             if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
                 if ctrl.stop:
@@ -246,9 +271,15 @@ def main():
             avg_dmg = float(np.mean([d for _, d, _, _, _ in used])) if used else 0.0
             wins = sum(1 for r, _, _, _, _ in used if r == "win")
             drop_mean = float(np.mean(drops)) if drops else 0.0
+            # 本輪各場實際難度（每場開場時讀）；可能在 update 中途被調過，故 log 顯示範圍
+            sc = [s for s in scales if s is not None]
+            scale = sc[-1] if sc else None       # CSV 記最後一場（最接近當下）；None=mod 沒載入
+            scale_str = ("" if not sc else
+                         (f"{min(sc):.2f}" if min(sc) == max(sc) else f"{min(sc):.2f}-{max(sc):.2f}"))
             log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f} wins={wins}/{len(used)} "
                 f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} "
-                f"kl={st['kl']:.3f} tele_drop={drop_mean:.0%}")
+                f"kl={st['kl']:.3f} tele_drop={drop_mean:.0%}"
+                + (f" scale={scale_str}" if scale_str else ""))
             if drop_mean > TELE_DROP_WARN:
                 log(f"  ⚠ 本輪平均遙測掉包 {drop_mean:.0%}，請檢查 reward mod / UDP 是否正常。")
 
@@ -293,6 +324,7 @@ def main():
                 "eval_max_dmg": "" if eval_max is None else round(eval_max, 1),
                 "eval_wins": "" if eval_wins is None else eval_wins,
                 "eval_eps": "" if eval_n is None else eval_n,
+                "scale": "" if scale is None else round(scale, 4),
             })
             csvf.flush()
     finally:

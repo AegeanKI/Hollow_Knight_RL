@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>HKCurriculum</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- 遊戲的 Managed 目錄（實際生效的安裝在 D 槽，不是 C:\SteamLibrary） -->
+    <ManagedDir>D:\Program Files (x86)\Steam\steamapps\common\Hollow Knight\hollow_knight_Data\Managed</ManagedDir>
+    <ModsDir>$(ManagedDir)\Mods\HKCurriculum</ModsDir>
+  </PropertyGroup>
+
+  <!-- 只有 SDK，沒有 VS：用這個套件提供 net472 的參考組件 -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- HookGen：提供 On.HealthManager.TakeDamage 等 hook（做法D 放大傷害用） -->
+    <Reference Include="MMHOOK_Assembly-CSharp">
+      <HintPath>$(ManagedDir)\MMHOOK_Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 編譯後自動把 DLL 複製進遊戲 Mods 資料夾 -->
+  <Target Name="DeployMod" AfterTargets="Build">
+    <MakeDir Directories="$(ModsDir)" />
+    <Copy SourceFiles="$(OutputPath)HKCurriculum.dll" DestinationFolder="$(ModsDir)" />
+    <Message Importance="high" Text="HKCurriculum.dll -> $(ModsDir)" />
+  </Target>
+
+</Project>
