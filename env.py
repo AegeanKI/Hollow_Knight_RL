@@ -24,21 +24,32 @@ class BossDamageTracker:
 
     記下第一個有效血量(boss0)與最新血量(last)，dmg = boss0 - last。
     boss_hp_raw 取自 env 的 step info（<0 表示這 tick 還沒看到 boss）。
+
+    win 例外：尾刀常在兩次 15Hz 取樣間擊殺、boss 隨即消失，last 停在死前
+    剩血(>0) → 少算最後一塊（甚至 lose 的 dmg 看起來比 win 還高）。win 代表
+    boss 血量全清，真實傷害就是 boss0，故獲勝時直接回傳 boss0。
     """
     def __init__(self):
         self.boss0 = None       # 第一個有效(>=0)的 boss 血量
         self.last = -1          # 最新一次的 boss 血量
+        self.won = False        # 本場是否獲勝（boss 血量全清）
 
     def update(self, info):
         hp = info.get("boss_hp_raw", -1)
         if self.boss0 is None and hp >= 0:
             self.boss0 = hp
         self.last = hp
+        if info.get("result") == "win":
+            self.won = True
         return self
 
     @property
     def dmg(self):
-        return (self.boss0 - self.last) if self.boss0 is not None else 0
+        if self.boss0 is None:
+            return 0
+        if self.won:                       # 獲勝 = boss 滿血全被打掉
+            return self.boss0
+        return self.boss0 - self.last
 
 
 class HollowKnightEnv:
