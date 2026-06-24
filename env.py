@@ -12,6 +12,7 @@ import time
 import numpy as np
 
 import config
+import curriculum
 from autostart import EpisodeMonitor, start_challenge
 from capture import Capturer
 from inputs import make_actuator
@@ -64,6 +65,7 @@ class HollowKnightEnv:
         self._steps = 0
         self._prev_boss = None
         self._prev_player = None
+        self._scale = 1.0       # 作法A：本場 reward 正規化 scale（reset 時依 curriculum 設定）
         # B4 遙測健康：每場統計「拿到新鮮遙測的 tick 比例」
         self._tele_ok = 0
         self._tele_total = 0
@@ -114,6 +116,9 @@ class HollowKnightEnv:
                 self._steps = 0
                 self._tele_ok = 0
                 self._tele_total = 0
+                # 作法A：本場 reward 正規化用的 scale（開場已定、整場固定）。
+                # eval 場回 1.0（mod 不放大）；訓練場 = 目前難度比例。
+                self._scale = curriculum.effective_scale()
                 self._next_t = time.perf_counter() + config.TICK_DT
                 return self.stacker.get(), {}
             wait = min(1.0 * (attempt + 1), 5.0)     # 退避：1,2,3,4,5,5...
@@ -163,11 +168,12 @@ class HollowKnightEnv:
         if player >= 0:
             info["player_hp"] = player
 
-        # 造成傷害（兩端都有效時才算，避免 -1 sentinel 造成爆衝）
+        # 造成傷害（兩端都有效時才算，避免 -1 sentinel 造成爆衝）。
+        # 作法A：×_scale 把「被 mod 放大的 boss 掉血」還原成真實傷害，低難度不再多領。
         if boss >= 0 and self._prev_boss is not None and self._prev_boss >= 0:
             dmg = max(0, self._prev_boss - boss)
-            r += config.RW_DMG * dmg
-        # 自己掉血
+            r += config.RW_DMG * dmg * self._scale
+        # 自己掉血（不乘 scale：被打的難度與 boss 血量放大無關）
         if player >= 0 and self._prev_player is not None and self._prev_player >= 0:
             hit = max(0, self._prev_player - player)
             r -= config.RW_HIT * hit
@@ -179,10 +185,11 @@ class HollowKnightEnv:
 
         result = self.monitor.update(tele)
         terminated = result in ("win", "lose", "left")
+        # 作法A：贏弱化版不值錢(×scale)、輸弱化版更痛(/scale，設上限防龜縮)
         if result == "win":
-            r += config.RW_WIN
+            r += config.RW_WIN * self._scale
         elif result == "lose":
-            r -= config.RW_LOSE
+            r -= min(config.RW_LOSE / self._scale, config.RW_LOSE_CAP)
         info["result"] = result
         return r, terminated, info
 

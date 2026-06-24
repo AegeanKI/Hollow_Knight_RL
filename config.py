@@ -53,10 +53,18 @@ OBS_GRAYSCALE = False  # False=RGB(3ch)，大黃蜂的紅色對辨識有幫助�
 # ---- RL reward ---------------------------------------------------------------
 # 每 tick reward = 造成傷害*RW_DMG - 掉血*RW_HIT；終局再加勝/敗 bonus。
 # 量級設計：打掉全部 900 血 ≈ +9，掉光 9 面具 ≈ -9，勝 +10，敗 -5。可調。
-RW_DMG = 0.02          # 每點 boss 血（進攻型：打掉 900 血 = +18）
+#
+# curriculum 難度耦合（作法 A，2026-06-24）：mod 在 scale<1 時把對 boss 的傷害放大
+# 1/scale，使 boss_hp_raw 的跌幅(=這裡的 dmg)被等比放大。為避免「低難度照領滿額傷害
+# reward / 用滿額勝利 bonus 鑽弱化版漏洞」，把 **boss 傷害相關項乘上 scale 還原成真實
+# 傷害**、勝利 bonus 乘 scale、敗北 penalty 除以 scale（贏弱化版不值錢、輸弱化版更痛）。
+# scale 由 env 每場開場讀 curriculum.effective_scale()（eval 場固定 1.0，mod 不放大）。
+# 掉血 penalty(RW_HIT) 不乘 scale：被打的難度與 boss 血量放大無關。
+RW_DMG = 0.02          # 每點 boss 真實血（×scale 還原；打掉真實 900 血 = +18）
 RW_HIT = 0.5           # 每個面具（掉 1 面具 = -0.5）
-RW_WIN = 15.0          # 勝利 bonus
-RW_LOSE = 3.0          # 敗北 penalty（會取負）
+RW_WIN = 15.0          # 勝利 bonus（實得 = RW_WIN×scale：贏滿血 +15、贏 0.6 +9）
+RW_LOSE = 3.0          # 敗北 penalty（實扣 = RW_LOSE/scale，取負；輸滿血 -3、輸 0.6 -5）
+RW_LOSE_CAP = 6.0      # 敗北 penalty 上限（防 scale 過低時懲罰爆炸/變龜縮；0.5→6 剛好不觸頂）
 RW_TIME = 0.0          # 每步時間懲罰（先 0，需要時設小負值催它快點打）
 MAX_EPISODE_STEPS = 1500   # 截斷上限（~100s），避免卡住
 

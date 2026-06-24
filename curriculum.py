@@ -26,9 +26,22 @@ def end_eval():
 
 
 def read_scale():
-    """讀目前難度比例(0.6~1.0)；mod 沒載入/讀不到回 None。"""
+    """讀目前難度比例(0.5~1.0)；mod 沒載入/讀不到回 None。"""
     try:
         with open(config.CURRICULUM_SCALE_FILE) as f:
             return float(f.read().strip())
     except (OSError, ValueError):
         return None
+
+
+def effective_scale():
+    """本場 reward 正規化要用的 scale（作法 A）。
+
+    eval 場 mod 固定 100% 不放大 → 因子 1.0（不可誤用訓練 scale，否則真實傷害會被
+    再乘一次 scale 而低估）。訓練場用 read_scale()；mod 沒載入/讀不到也回 1.0
+    （= 不放大、reward 不變，安全降級）。
+    """
+    if os.path.exists(config.CURRICULUM_EVAL_FLAG):
+        return 1.0
+    s = read_scale()
+    return s if s is not None else 1.0
