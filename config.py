@@ -31,6 +31,11 @@ ACTION_NAMES = [a.name for a in ACTIONS]     # 語意名稱（給 log/檢視顯�
 KEY_INDEX = {k: i for i, k in enumerate(ACTION_KEYS)}  # 實體鍵 -> MultiBinary index
 N_ACTIONS = len(ACTIONS)
 
+# 方向鍵集合（用 Action 取值，與動作定義同源，勿硬寫字串）。
+# 鍵盤後端送鍵時「方向先就位、再動其他動作鍵」，確保如旋風斬/蓄力斬這類
+# 「放開攻擊瞬間讀方向」的劍技，attack edge 時讀到的是本 tick 的目標方向。
+DIRECTION_KEYS = frozenset(a.value for a in (Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT))
+
 # ---- 時序 --------------------------------------------------------------------
 # 控制 tick 頻率（Hz）。這是整個系統唯一的時鐘：擷取、按鍵取樣、reward 取樣都跟它對齊。
 # 15Hz = 每 66.7ms 一個決策。先用 15，之後可調。

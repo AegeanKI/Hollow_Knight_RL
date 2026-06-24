@@ -3,10 +3,15 @@
 用 pydirectinput（底層 SendInput + scan code），比一般虛擬鍵更容易被遊戲收到。
 Actuator 維護「目前實際按住」的狀態，每個 tick 只送出差異（新按下/放開），
 這正是訓練時 env.step(action) 要做的事——錄製和推論共用同一套執行器。
+
+鍵盤後端的送鍵有先後順序（見 Actuator.apply_keys）：方向鍵先就位、再動其他
+動作鍵。因為 pydirectinput 經 SendInput 逐鍵即時生效、無法原子提交，而遊戲 fps
+高於控制 tick，會取樣到 tick 內的中間態；先定方向可避免劍技讀錯方向。手把後端
+（GamepadActuator）則是 reset→改本地→update() 原子提交，天生無此問題。
 """
 import pydirectinput
 
-from config import Action
+from config import Action, DIRECTION_KEYS
 from keys import vec_to_keys
 
 # 低延遲設定：拿掉每次操作之間的內建延遲與 failsafe。
@@ -19,12 +24,22 @@ class Actuator:
         self._held = set()  # 目前實際按住的鍵名
 
     def apply_keys(self, target: set):
-        """讓實際按住的鍵 == target。只送出差異。"""
+        """讓實際按住的鍵 == target。只送出差異。
+
+        送鍵順序：方向鍵(先放開、再按下) → 其他動作鍵(放開、按下)。
+        先把方向鍵調到本 tick 的最終狀態，再動 attack 等動作鍵，這樣動作鍵
+        edge 的那一幀讀到的方向必為目標值——避免「放開攻擊同 tick 才切方向」
+        時，遊戲較高 fps 取樣到中間態而把旋風斬讀成蓄力斬（反之亦然）。
+        """
         to_press = target - self._held
         to_release = self._held - target
-        for k in to_release:
+        for k in to_release & DIRECTION_KEYS:   # 1. 方向先放開（換向時不殘留雙押）
             pydirectinput.keyUp(k)
-        for k in to_press:
+        for k in to_press & DIRECTION_KEYS:     # 2. 方向再按下 → 方向此刻已就位
+            pydirectinput.keyDown(k)
+        for k in to_release - DIRECTION_KEYS:   # 3. 才動作鍵：其 edge 會讀到上面的方向
+            pydirectinput.keyUp(k)
+        for k in to_press - DIRECTION_KEYS:
             pydirectinput.keyDown(k)
         self._held = set(target)
 
