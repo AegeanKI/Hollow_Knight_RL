@@ -256,8 +256,10 @@ def main():
                 flag = ("" if ep.drop <= TELE_DROP_WARN
                         else f"  ⚠遙測掉包{ep.drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
                 ep_summ.append((ep.result, ep.dmg, ep.ep_r, ep.steps, healthy))
+                # 括號內 = 實際打出的傷害 = dmg×scale（扣掉作法D的放大；跨 scale 可比）
+                real_tag = f" ({ep.dmg * ep.scale:.0f})" if ep.scale is not None else ""
                 scale_tag = f" scale={ep.scale:.2f}" if ep.scale is not None else ""
-                log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f} "
+                log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f}{real_tag} "
                     f"reward={ep.ep_r:6.2f} steps={ep.steps}{flag}{scale_tag}")
 
             if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
@@ -271,12 +273,16 @@ def main():
             avg_dmg = float(np.mean([d for _, d, _, _, _ in used])) if used else 0.0
             wins = sum(1 for r, _, _, _, _ in used if r == "win")
             drop_mean = float(np.mean(drops)) if drops else 0.0
+            # 括號內 = 實際傷害平均 = 逐場 dmg×scale 再平均（扣掉作法D放大；跨 scale 可比）
+            real = [d * s for (_, d, _, _, h), s in zip(ep_summ, scales) if h and s is not None]
+            avg_real = float(np.mean(real)) if real else None
+            real_tag = f" ({avg_real:.0f})" if avg_real is not None else ""
             # 本輪各場實際難度（每場開場時讀）；可能在 update 中途被調過，故 log 顯示範圍
             sc = [s for s in scales if s is not None]
             scale = sc[-1] if sc else None       # CSV 記最後一場（最接近當下）；None=mod 沒載入
             scale_str = ("" if not sc else
                          (f"{min(sc):.2f}" if min(sc) == max(sc) else f"{min(sc):.2f}-{max(sc):.2f}"))
-            log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f} wins={wins}/{len(used)} "
+            log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f}{real_tag} wins={wins}/{len(used)} "
                 f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} "
                 f"kl={st['kl']:.3f} tele_drop={drop_mean:.0%}"
                 + (f" scale={scale_str}" if scale_str else ""))

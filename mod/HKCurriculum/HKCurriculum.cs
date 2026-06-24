@@ -60,11 +60,14 @@ namespace HKCurriculum
         private const float ScaleMin = 0.60f;    // 最低降到 60%
         private const float ScaleMax = 1.00f;    // 最高回到 100%
         private const float ScaleStep = 0.05f;   // 每次調整步階
-        private const int Window = 10;           // 滑動勝率視窗（場數）
+        // 滑動勝率視窗（場數）。**必須明顯大於學習尺度(eps/update=8)**，否則升難度後策略
+        // 只跑 ~1 次 update 還沒適應就被判「太難」而反覆降回（thrashing）。30≈4 次 update，
+        // 給策略時間在新難度學透才評估；還會 ping-pong 就再加大到 40-50。
+        private const int Window = 30;
         private const float RaiseAbove = 0.60f;  // 勝率 > 此 -> 升難度
         private const float LowerBelow = 0.30f;  // 勝率 < 此 -> 降難度
         private const int BossMinHp = 200;       // 視為 boss 的最低滿血（過濾雜魚）
-        private const int WaitFrames = 5;        // 等 FSM 設好滿血再縮放的幀數（實測可調）
+        private const int WaitFrames = 5;        // 等 FSM 設好滿血再判定是不是 boss 的幀數（實測可調）
         private const float PollInterval = 1f / 15f;
 
         // 目標 boss 場景（對應 Python config.HORNET_SCENES）
@@ -198,14 +201,19 @@ namespace HKCurriculum
             return (float)w / _results.Count;
         }
 
+        // 自適應難度（滑動勝率視窗 + 死區遲滯）：
+        //  - 視窗永遠只留最近 Window 場（每場滑動）；滿 Window 後「每打一場就重新評估一次」。
+        //  - 勝率 > RaiseAbove 升、< LowerBelow 降（嚴格比較；剛好等於門檻算死區、不動）。
+        //  - 只有「真的升/降」才清空視窗 = 冷卻：之後要再湊滿 Window 場才可能下一次調整。
+        //  - 落在 [LowerBelow, RaiseAbove] 死區 -> 維持同一 scale、視窗繼續滑（可停留很多場，正常）。
         private void AdjustScale()
         {
-            if (_results.Count < Window) return;     // 樣本不足先不動，避免抖動
+            if (_results.Count < Window) return;     // 視窗未滿先不動（剛清空後要重新累積）
             float wr = WinRate();
             if (wr > RaiseAbove) Scale = Mathf.Min(ScaleMax, Scale + ScaleStep);
             else if (wr < LowerBelow) Scale = Mathf.Max(ScaleMin, Scale - ScaleStep);
-            else return;
-            _results.Clear();   // 換難度後清空視窗，讓新難度重新累積勝率（避免污染）
+            else return;                             // 死區：不動、也不清空（繼續滑動評估）
+            _results.Clear();                        // 升/降後清空，讓新難度重新累積勝率
         }
 
         // ---- 持久化 / 檔案交握 ----

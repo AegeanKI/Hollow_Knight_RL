@@ -19,5 +19,5 @@ capture_obs.png
 mod/**/bin/
 mod/**/obj/
 
-# 本機專屬設定
-.claude/settings.local.json
+# 本機 Claude 設定與進度快照（不進版控）
+.claude/

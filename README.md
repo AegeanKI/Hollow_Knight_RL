@@ -105,6 +105,13 @@ RL 重要行為：
 | `play_rl.py` | 載入 RL checkpoint 實際打給你看（決定性） |
 | `env_test.py` | 用 BC 驅動驗證 env 自動重開那圈是否穩定（含實測 Hz） |
 
+### 階段 2 — 自適應難度（A1 curriculum，進行中）
+讓卡在 plateau 的 agent 先在弱化版打贏、收集勝利訊號(`RW_WIN`)，再隨勝率漸進調回 100%。
+| 檔案 | 用途 |
+|---|---|
+| `mod/HKCurriculum/` | **C# 難度 mod**：依滑動勝率(視窗 30 場)自動調 scale 0.6~1.0。**作法D**＝hook `HealthManager.TakeDamage` 把對 boss 的傷害 ×1/scale → 整場等比壓縮(所有 phase 都在、各自縮短)、boss 在打出 scale×滿血的真實傷害時死。勝負偵測/自適應/持久化(state+log)內建 |
+| `curriculum.py` | Python↔mod 檔案交握：`begin_eval/end_eval`(eval 強制 100%、不放大、不計入)、`read_scale`(讀目前難度寫進 log/CSV) |
+
 ### 自動開場
 | 檔案 / 資料 | 用途 |
 |---|---|
@@ -128,7 +135,8 @@ RL 重要行為：
 | `checkpoints/bc.pt` | BC 最佳模型 |
 | `checkpoints/rl_latest.pt` / `rl_best.pt` / `rl_uXXXX.pt` | RL 最新 / 最佳(由 eval 選) / 編號快照 |
 | `logs/train_rl.log` | RL 訓練文字 log |
-| `logs/metrics.csv` | 每次 update 一列指標（train/eval 傷害、勝場、loss、entropy、kl、遙測掉包率），用來畫曲線 |
+| `logs/metrics.csv` | 每次 update 一列指標（train/eval 傷害、勝場、loss、entropy、kl、遙測掉包率、難度 scale），用來畫曲線 |
+| `.claude/progress.md` | 當前進度快照（在做什麼、改了哪些檔、待辦、訓練現況） |
 
 > 大型/可重生產物（`data/*.npz`、`checkpoints/`、`logs/`、除錯圖）已在 `.gitignore` 排除，不進版控。
 
