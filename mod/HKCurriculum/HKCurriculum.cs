@@ -12,7 +12,7 @@ namespace HKCurriculum
     // 自適應難度 mod（A1 curriculum）：每場戰鬥依「滑動勝率」調整難度。
     // 做法 D：不動 boss 血量，而是「放大 agent 對 boss 的傷害」(×1/scale)，讓整場戰鬥
     // 等比壓縮（所有 phase 都在、各自縮短），boss 在打出 scale×滿血 的真實傷害時死。
-    // 輸太多 -> 降 scale（傷害放更大、更好贏，最低 60%）讓 agent 收集到勝利訊號；
+    // 輸太多 -> 降 scale（傷害放更大、更好贏，最低 50%）讓 agent 收集到勝利訊號；
     // 贏太多 -> 升 scale（回到 ×1，最高 100%）。eval 固定不放大（Python 寫 eval 旗標檔）。
     //
     // 與 HKReward 分工：HKReward 只讀遙測；本 mod 只控難度。Python 用絕對 boss_hp_raw 判
@@ -57,7 +57,7 @@ namespace HKCurriculum
     public class CurriculumPump : MonoBehaviour
     {
         // ---- 可調參數 ----
-        private const float ScaleMin = 0.60f;    // 最低降到 60%
+        private const float ScaleMin = 0.50f;    // 最低降到 50%
         private const float ScaleMax = 1.00f;    // 最高回到 100%
         private const float ScaleStep = 0.05f;   // 每次調整步階
         // 滑動勝率視窗（場數）。**必須明顯大於學習尺度(eps/update=8)**，否則升難度後策略
