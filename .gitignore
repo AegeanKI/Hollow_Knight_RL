@@ -8,6 +8,7 @@ data/*
 
 # 模型權重（大型二進位，不進版控）
 checkpoints/
+checkpoints_*/
 
 # 日誌與除錯擷取圖（可重生）
 logs/

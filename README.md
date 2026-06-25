@@ -60,7 +60,7 @@ RL 重要行為：
 |---|---|
 | `config.py` | 集中設定：動作鍵(Action Enum)、tick 頻率(15Hz)、觀測尺寸、reward 權重(RW_*)、遙測 port、路徑等 |
 | `keys.py` | 動作編碼/解碼（鍵集合 ↔ MultiBinary 向量）+ 用 Win32 定位遊戲視窗區域 |
-| `obs.py` | 觀測前處理（96→64、可選灰階、CHW、float[0,1]）+ `FrameStacker` 疊幀。**訓練/推論共用，確保一致** |
+| `obs.py` | 觀測前處理（96→`NET_SIZE`，現 **96**＝不再降採樣、可選灰階、CHW、float[0,1]）+ `FrameStacker` 疊幀。**訓練/推論共用，確保一致** |
 
 ### 擷取與輸入
 | 檔案 | 用途 |
@@ -99,7 +99,7 @@ RL 重要行為：
 | 檔案 | 用途 |
 |---|---|
 | `env.py` | `HollowKnightEnv`：Gym 風格 reset/step。觀測=疊幀畫面、reward=遙測血量變化；reset 自動重開且**失敗不崩**(回 None)，每場統計遙測健康度 |
-| `ppo.py` | `RolloutBuffer`(GAE，正確區分 truncate/terminal) + `ppo_update()`。與環境解耦，可離線測 |
+| `ppo.py` | `RolloutBuffer`(GAE，正確區分 truncate/terminal) + `ppo_update()` + `RunningMeanStd`（① return-std 正規化：用 raw return 的跑動 std 縮放 reward，穩住 critic、與 curriculum scale 解耦）。`vf_coef=0.25`。與環境解耦，可離線測 |
 | `train_rl.py` | PPO 主訓練：從 bc.pt 初始化、episode 間更新、eval 選 best、CSV 指標、遙測丟棄、F10 停 F9 暫停 |
 | `eval.py` | 評估某 checkpoint 的真實實力（決定性出招），印勝率/平均/最高傷害 |
 | `play_rl.py` | 載入 RL checkpoint 實際打給你看（決定性） |
@@ -107,10 +107,11 @@ RL 重要行為：
 
 ### 階段 2 — 自適應難度（A1 curriculum，進行中）
 讓卡在 plateau 的 agent 先在弱化版打贏、收集勝利訊號(`RW_WIN`)，再隨勝率漸進調回 100%。
+> **reward 與難度耦合（作法A）**：低 scale 時 boss 掉血被放大，為免 agent 鑽「弱化版照領滿額獎賞」的漏洞，reward 端把 boss 傷害 `×scale` 還原真實傷害、勝利 bonus `×scale`、敗北 penalty `÷scale`。詳見 `config.py` 的 `RW_*` 與 `env.py`。
 | 檔案 | 用途 |
 |---|---|
-| `mod/HKCurriculum/` | **C# 難度 mod**：依滑動勝率(視窗 30 場)自動調 scale 0.6~1.0。**作法D**＝hook `HealthManager.TakeDamage` 把對 boss 的傷害 ×1/scale → 整場等比壓縮(所有 phase 都在、各自縮短)、boss 在打出 scale×滿血的真實傷害時死。勝負偵測/自適應/持久化(state+log)內建 |
-| `curriculum.py` | Python↔mod 檔案交握：`begin_eval/end_eval`(eval 強制 100%、不放大、不計入)、`read_scale`(讀目前難度寫進 log/CSV) |
+| `mod/HKCurriculum/` | **C# 難度 mod**：依滑動勝率(視窗 30 場)自動調 scale **0.5~1.0**。**作法D**＝hook `HealthManager.TakeDamage` 把對 boss 的傷害 ×1/scale → 整場等比壓縮(所有 phase 都在、各自縮短)、boss 在打出 scale×滿血的真實傷害時死。勝負偵測/自適應/持久化(state+log)內建 |
+| `curriculum.py` | Python↔mod 檔案交握：`begin_eval/end_eval`(eval 強制 100%、不放大、不計入)、`read_scale`(讀目前難度寫進 log/CSV)、`effective_scale`(本場 reward 正規化用的 scale；eval 固定 1.0) |
 
 ### 自動開場
 | 檔案 / 資料 | 用途 |
@@ -125,6 +126,7 @@ RL 重要行為：
 | `keep_pad.py` | 只是保持虛擬 Xbox 手把連接（給 HidHide / 遊戲設定能選到它）。Ctrl+C 結束 |
 | `diag_input_hook.py` | 診斷：低階鍵盤 hook 抓「被注入的按鍵」，用來查 keymapper 把手把翻成鍵盤的問題（即時寫 `diag_input_hook.log`） |
 | `gae_truncate_test.py` | 離線單元測試：驗證 `RolloutBuffer.finish()` 的 truncate/terminal/中途切斷三種 GAE 收尾正確 |
+| `view_obs.py` | 表徵診斷：從 demo npz 以 `M×M×N`(參數可調)顯示連續幀，目視判斷某解析度/幀數下分不分得出 boss 招式。`←→`滑幀、`g`灰階。（用它定出 NET_SIZE 64→96） |
 
 ---
 
