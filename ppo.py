@@ -4,6 +4,50 @@ import torch
 import torch.nn as nn
 
 
+class RunningMeanStd:
+    """跑動均值/方差（Welford 批次版）。① 用來估 return 尺度做正規化，狀態存進 checkpoint。"""
+    def __init__(self):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+
+    def update(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        if x.size == 0:
+            return
+        bm, bv, bc = x.mean(), x.var(), x.size
+        delta = bm - self.mean
+        tot = self.count + bc
+        self.mean += delta * bc / tot
+        m_a, m_b = self.var * self.count, bv * bc
+        self.var = (m_a + m_b + delta * delta * self.count * bc / tot) / tot
+        self.count = tot
+
+    @property
+    def std(self):
+        return float(np.sqrt(self.var)) + 1e-8
+
+    def state_dict(self):
+        return {"mean": self.mean, "var": self.var, "count": self.count}
+
+    def load_state_dict(self, s):
+        self.mean, self.var, self.count = s["mean"], s["var"], s["count"]
+
+
+def mc_returns(rew, done, gamma):
+    """每步的折扣蒙地卡羅回報（value-independent，只用來估 return 的尺度 σ）。"""
+    rew = np.asarray(rew, dtype=np.float64)
+    done = np.asarray(done, dtype=np.float64)
+    G = np.zeros_like(rew)
+    run = 0.0
+    for t in range(len(rew) - 1, -1, -1):
+        if done[t]:
+            run = 0.0
+        run = rew[t] + gamma * run
+        G[t] = run
+    return G
+
+
 class RolloutBuffer:
     """收集 transitions；finish() 算出 GAE 優勢與 returns。
 
@@ -23,8 +67,8 @@ class RolloutBuffer:
     def __len__(self):
         return len(self.rew)
 
-    def finish(self, gamma=0.99, lam=0.95):
-        rew = np.asarray(self.rew, dtype=np.float32)
+    def finish(self, gamma=0.99, lam=0.95, rew_scale=1.0):
+        rew = np.asarray(self.rew, dtype=np.float32) * rew_scale
         val = np.asarray(self.val, dtype=np.float32)
         done = np.asarray(self.done, dtype=np.float32)   # episode 邊界（term 或 trunc）
         term = np.asarray(self.term, dtype=np.float32)   # 真正終局；只有它砍掉未來價值
@@ -46,10 +90,20 @@ class RolloutBuffer:
         return adv, ret
 
 
-def ppo_update(ac, opt, buffer, device, epochs=4, batch_size=256,
-               clip=0.2, vf_coef=0.5, ent_coef=0.0005, max_grad=0.5):
-    """對緩衝內資料做數個 epoch 的 PPO 更新。回傳統計 dict。"""
-    adv, ret = buffer.finish()
+def ppo_update(ac, opt, buffer, device, ret_rms=None, epochs=4, batch_size=256,
+               clip=0.2, vf_coef=0.25, ent_coef=0.0005, max_grad=0.5, gamma=0.99, lam=0.95):
+    """對緩衝內資料做數個 epoch 的 PPO 更新。回傳統計 dict。
+
+    ① return 正規化：用 raw return 的跑動 std(ret_rms) 縮放 reward → value 目標 ~O(1)、
+    且跟 curriculum 改 scale 造成的 reward 量級漂移解耦，穩住 critic。advantage 之後仍會
+    逐批標準化，故 policy 梯度尺度不受影響（只動 value 目標尺度）。ret_rms=None 則不縮放。
+    """
+    if ret_rms is not None:
+        ret_rms.update(mc_returns(buffer.rew, buffer.done, gamma))
+        rew_scale = 1.0 / ret_rms.std
+    else:
+        rew_scale = 1.0
+    adv, ret = buffer.finish(gamma=gamma, lam=lam, rew_scale=rew_scale)
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     obs = torch.as_tensor(np.stack(buffer.obs), dtype=torch.float32)
@@ -89,4 +143,6 @@ def ppo_update(ac, opt, buffer, device, epochs=4, batch_size=256,
                 stats["kl"] += (olp - logp).mean().item()
                 stats["n"] += 1
     m = max(stats["n"], 1)
-    return {k: (v / m if k != "n" else v) for k, v in stats.items()}
+    out = {k: (v / m if k != "n" else v) for k, v in stats.items()}
+    out["ret_std"] = (1.0 / rew_scale) if rew_scale else 0.0   # 目前 return 尺度（給 log/CSV）
+    return out

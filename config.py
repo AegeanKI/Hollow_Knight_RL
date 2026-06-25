@@ -109,7 +109,10 @@ RL_BEST_CKPT = "rl_best.pt"       # 階段2 RL 最佳（由決定性 eval 選）
 # ---- 網路輸入 ----------------------------------------------------------------
 # 進網路前把 96x96 觀測再降到 NET_SIZE，並疊 FRAME_STACK 張連續幀（給速度/方向資訊）。
 # 推論與訓練必須用同一組設定（共用 obs.py 的前處理）。
-NET_SIZE = 64        # 網路輸入邊長
+# NET_SIZE 64->96（2026-06-25，作法③）：view_obs 診斷確認 64×64 分不出部分 boss 招式前搖、
+# 96×96 才分得出（是「空間解析度」在起作用，幀數 4 已足）。OBS_SIZE 本就是 96，故 96→96 等同
+# 不再降採樣、零擷取改動、demo 不用重錄；換解析度=conv flatten 維度變→須重訓 BC、PPO 從頭。
+NET_SIZE = 96        # 網路輸入邊長
 FRAME_STACK = 4      # 疊幾張連續幀
 # 輸入通道數：RGB=3 -> 3*FRAME_STACK；灰階=1 -> FRAME_STACK
 NET_CHANNELS = (1 if OBS_GRAYSCALE else 3) * FRAME_STACK

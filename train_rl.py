@@ -41,7 +41,7 @@ import curriculum
 from ac_model import ActorCritic
 from controls import ControlKeys
 from env import BossDamageTracker, HollowKnightEnv
-from ppo import RolloutBuffer, ppo_update
+from ppo import RolloutBuffer, RunningMeanStd, ppo_update
 
 # 固定輸入尺寸 -> 讓 cudnn 選好演算法（也避開 CUDNN_STATUS_NOT_SUPPORTED 的 plan warning）
 torch.backends.cudnn.benchmark = True
@@ -85,9 +85,12 @@ def _open_csv():
     return f, w
 
 
-def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg):
-    torch.save({"model": ac.state_dict(), "opt": opt.state_dict(),
-                "update_i": update_i, "ep_i": ep_i, "best_dmg": best_dmg}, path)
+def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg, ret_rms=None):
+    ck = {"model": ac.state_dict(), "opt": opt.state_dict(),
+          "update_i": update_i, "ep_i": ep_i, "best_dmg": best_dmg}
+    if ret_rms is not None:
+        ck["ret_rms"] = ret_rms.state_dict()      # ① return 正規化狀態（接續才一致）
+    torch.save(ck, path)
 
 
 def eval_one_episode(env, ac, device, should_stop):
@@ -198,6 +201,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ac = ActorCritic().to(device)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr)
+    ret_rms = RunningMeanStd()                    # ① return 正規化的跑動尺度
     update_i, ep_i, best_dmg = 0, 0, -1.0
 
     # 決定要從哪載入：--ckpt 指定 > --resume(latest) > 從 BC 初始化
@@ -214,6 +218,8 @@ def main():
         ck = torch.load(resume_path, map_location=device)
         ac.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
         update_i, ep_i, best_dmg = ck["update_i"], ck["ep_i"], ck["best_dmg"]
+        if "ret_rms" in ck:                       # ① 接續時還原 return 尺度；舊檔沒有就從頭估
+            ret_rms.load_state_dict(ck["ret_rms"])
         log(f"接續訓練 from {resume_path}：update={update_i} ep={ep_i} best_dmg={best_dmg:.0f}")
     else:
         bc = torch.load(os.path.join(config.CKPT_DIR, config.BC_CKPT), map_location=device)
@@ -267,7 +273,7 @@ def main():
                     break
                 log("  ⚠ 本輪沒有可用 episode（開場失敗或遙測全壞），略過此次更新。")
                 continue
-            st = ppo_update(ac, opt, buf, device, ent_coef=args.ent_coef)
+            st = ppo_update(ac, opt, buf, device, ret_rms=ret_rms, ent_coef=args.ent_coef)
             update_i += 1
             used = [e for e in ep_summ if e[4]]      # 真正納入更新的（遙測健康）場
             avg_dmg = float(np.mean([d for _, d, _, _, _ in used])) if used else 0.0
@@ -284,15 +290,15 @@ def main():
                          (f"{min(sc):.2f}" if min(sc) == max(sc) else f"{min(sc):.2f}-{max(sc):.2f}"))
             log(f"[UPDATE {update_i}] avg_dmg={avg_dmg:.0f}{real_tag} wins={wins}/{len(used)} "
                 f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} "
-                f"kl={st['kl']:.3f} tele_drop={drop_mean:.0%}"
+                f"kl={st['kl']:.3f} retσ={st['ret_std']:.1f} tele_drop={drop_mean:.0%}"
                 + (f" scale={scale_str}" if scale_str else ""))
             if drop_mean > TELE_DROP_WARN:
                 log(f"  ⚠ 本輪平均遙測掉包 {drop_mean:.0%}，請檢查 reward mod / UDP 是否正常。")
 
-            save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
+            save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
             if args.snapshot_every > 0 and update_i % args.snapshot_every == 0:
                 snap = os.path.join(config.CKPT_DIR, f"rl_u{update_i:04d}.pt")
-                save_ckpt(snap, ac, opt, update_i, ep_i, best_dmg)
+                save_ckpt(snap, ac, opt, update_i, ep_i, best_dmg, ret_rms)
                 log(f"  保存快照 {snap}")
 
             # ---- B6：rl_best 由「決定性評估的傷害」選出，而非訓練取樣的 avg_dmg ----
@@ -307,15 +313,15 @@ def main():
                         f"wins={eval_wins}/{eval_n} results={res}")
                     if eval_dmg > best_dmg:
                         best_dmg = eval_dmg
-                        save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg)
+                        save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
                         log(f"  ★ 新最佳(eval)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
-                        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)  # 同步 latest 的 best 欄
+                        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)  # 同步 latest 的 best 欄
             elif args.eval_every == 0:
                 # 沒開 eval 的退路：退回用訓練 avg_dmg 維持 best（legacy 行為）
                 if avg_dmg > best_dmg:
                     best_dmg = avg_dmg
-                    save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg)
-                    save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
+                    save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
+                    save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
                     log(f"  ★ 新最佳(train)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
 
             # ---- C8：每次 update 寫一列到 metrics.csv ----
@@ -335,7 +341,7 @@ def main():
             csvf.flush()
     finally:
         env.close()
-        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg)
+        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
         log(f"已停止並存檔。update={update_i} ep={ep_i}")
         csvf.close()
         logf.close()
