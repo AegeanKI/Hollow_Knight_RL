@@ -173,10 +173,18 @@ class HollowKnightEnv:
         if boss >= 0 and self._prev_boss is not None and self._prev_boss >= 0:
             dmg = max(0, self._prev_boss - boss)
             r += config.RW_DMG * dmg * self._scale
-        # 自己掉血（不乘 scale：被打的難度與 boss 血量放大無關）
+        # 自己血量變化（不乘 scale：被打/補血的難度與 boss 血量放大無關）。
         if player >= 0 and self._prev_player is not None and self._prev_player >= 0:
-            hit = max(0, self._prev_player - player)
-            r -= config.RW_HIT * hit
+            delta = player - self._prev_player
+            if delta < 0:
+                # 掉血：漸進——剩血比例越低，挨刀越貴（早期兇得起、末段才怕死）。
+                pmax = tele.get("player_max", -1)
+                frac = (player / pmax) if pmax and pmax > 0 else 1.0
+                late = 1.0 + config.RW_HIT_LATE_K * (1.0 - max(0.0, min(1.0, frac)))
+                r -= config.RW_HIT * (-delta) * late
+            elif delta > 0:
+                # 補血：補滿一格才給分（半截停掉=整數不變=不給分，自然罰浪費魂）。
+                r += config.RW_HEAL * delta
 
         if boss >= 0:
             self._prev_boss = boss
