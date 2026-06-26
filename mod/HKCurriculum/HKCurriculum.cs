@@ -206,14 +206,17 @@ namespace HKCurriculum
         //  - 勝率 > RaiseAbove 升、< LowerBelow 降（嚴格比較；剛好等於門檻算死區、不動）。
         //  - 只有「真的升/降」才清空視窗 = 冷卻：之後要再湊滿 Window 場才可能下一次調整。
         //  - 落在 [LowerBelow, RaiseAbove] 死區 -> 維持同一 scale、視窗繼續滑（可停留很多場，正常）。
+        //  - 觸頂(=ScaleMax)/觸底(=ScaleMin)被 clamp 而 scale 沒實際改變時「不清空」：否則卡在
+        //    地板又打不過會每滿 30 場就清一次、永遠重新累積，視窗無法跨 30 場累積進步。
         private void AdjustScale()
         {
             if (_results.Count < Window) return;     // 視窗未滿先不動（剛清空後要重新累積）
             float wr = WinRate();
+            float before = Scale;
             if (wr > RaiseAbove) Scale = Mathf.Min(ScaleMax, Scale + ScaleStep);
             else if (wr < LowerBelow) Scale = Mathf.Max(ScaleMin, Scale - ScaleStep);
             else return;                             // 死區：不動、也不清空（繼續滑動評估）
-            _results.Clear();                        // 升/降後清空，讓新難度重新累積勝率
+            if (Scale != before) _results.Clear();   // 只有真的升/降才清空；觸頂/觸底沒變不清
         }
 
         // ---- 持久化 / 檔案交握 ----
