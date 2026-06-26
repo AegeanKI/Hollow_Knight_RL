@@ -22,6 +22,16 @@ def vec_to_keys(vec) -> set:
     return {ACTION_KEYS[i] for i in range(N_ACTIONS) if vec[i]}
 
 
+def format_action_row(vec) -> str:
+    """把 MultiBinary(11) 排成定寬欄位診斷字串：按下顯示鍵名、沒按下換成等寬空白。
+    欄位順序與標籤 = ACTION_KEYS（up down left right z x c v s a d）。
+    例：只按 up 和 x → '[up                   x          ]'。
+    用途：每 tick 印「模型實際輸出的向量」，對照畫面分辨「卡鍵」vs「模型真的持續輸出同方向」。"""
+    cells = [ACTION_KEYS[i] if (i < len(vec) and vec[i]) else " " * len(ACTION_KEYS[i])
+             for i in range(N_ACTIONS)]
+    return "[" + " ".join(cells) + "]"
+
+
 # ---- 視窗定位 (Win32 ctypes，免額外套件) -------------------------------------
 user32 = ctypes.windll.user32
 

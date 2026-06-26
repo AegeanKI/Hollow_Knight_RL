@@ -16,6 +16,7 @@ import curriculum
 from autostart import EpisodeMonitor, start_challenge
 from capture import Capturer
 from inputs import make_actuator
+from keys import format_action_row
 from obs import FrameStacker
 from telemetry import TelemetryReceiver
 
@@ -137,6 +138,8 @@ class HollowKnightEnv:
 
     def step(self, action_vec):
         """action_vec: MultiBinary(11)。回傳 (obs, reward, terminated, truncated, info)。"""
+        if config.TRACE_ACTIONS:
+            print(format_action_row(action_vec), flush=True)
         self.act.apply_vec(action_vec)
         self._wait_tick()                       # 維持 15Hz
 

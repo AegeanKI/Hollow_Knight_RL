@@ -83,6 +83,10 @@ RW_LOSE_CAP = 10.0     # 敗北 penalty 上限（防 scale 過低時懲罰爆炸
 RW_TIME = 0.0          # 每步時間懲罰（先 0，需要時設小負值催它快點打）
 MAX_EPISODE_STEPS = 1500   # 截斷上限（~100s），避免卡住
 
+# 診斷：設環境變數 HK_TRACE_ACTIONS=1 時，env 每 tick 印出模型送進 actuator 的按鍵
+# 向量（定寬欄位），用來分辨「卡鍵」vs「模型真的持續輸出同方向」。預設關。
+TRACE_ACTIONS = os.environ.get("HK_TRACE_ACTIONS", "") not in ("", "0", "false", "False")
+
 # ---- RL 訓練 ----
 EPISODES_PER_UPDATE = 8    # 收集幾場才做一次梯度更新（在 episode 之間更新，不搶即時 GPU）
 
