@@ -50,6 +50,7 @@ LATEST = os.path.join(config.CKPT_DIR, config.RL_LATEST_CKPT)
 BEST = os.path.join(config.CKPT_DIR, config.RL_BEST_CKPT)
 LOG_PATH = os.path.join("logs", "train_rl.log")
 CSV_PATH = os.path.join("logs", "metrics.csv")   # C8：每次 update 一列，方便畫曲線/比較
+OVER_PRINT_MAX = 20         # fps 診斷：第二行最多列幾個 over-tick 超時值（過多只列最大的前 N 個）
 
 # B4 遙測健康門檻
 TELE_DROP_WARN = 0.20       # 掉包率超過 -> 警告（訊號開始不可信）
@@ -134,7 +135,7 @@ def run_eval(env, ac, device, n_eps, should_stop):
 
 # 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
 # scale=這場實際打的難度（reset 後讀，mod 開場設定後到本場結束才會變）；mod 沒載入則 None
-EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale")
+EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale fps over_runs")
 
 
 def collect_one_episode(env, ac, device, should_stop):
@@ -161,7 +162,8 @@ def collect_one_episode(env, ac, device, should_stop):
     if steps == 0:                               # 0 步（剛 reset 完就被 stop）
         return None
     return EpisodeData(trans=trans, result=info["result"], dmg=boss.dmg,
-                       ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0), scale=scale)
+                       ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0), scale=scale,
+                       fps=info.get("fps", 0.0), over_runs=info.get("over_runs", []))
 
 
 def parse_args():
@@ -265,8 +267,24 @@ def main():
                 # 括號內 = 實際打出的傷害 = dmg×scale（扣掉作法D的放大；跨 scale 可比）
                 real_tag = f" ({ep.dmg * ep.scale:.0f})" if ep.scale is not None else ""
                 scale_tag = f" scale={ep.scale:.2f}" if ep.scale is not None else ""
+                # 實測 fps：低於目標(<14) 或有 tick 爆預算 時加 ⚠，提醒某環節太慢拖垮 15Hz
+                n_over = len(ep.over_runs)
+                fps_warn = "⚠" if (ep.fps < config.TICK_HZ - 1 or n_over > 0) else ""
+                fps_tag = f" fps={ep.fps:4.1f}{fps_warn}" + (f"(over{n_over})" if n_over else "")
                 log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f}{real_tag} "
-                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{flag}{scale_tag}")
+                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{fps_tag}{flag}{scale_tag}")
+                # 第二行：各 over-tick 超出 66.7ms 預算多少 ms，由大到小（過多時截斷，附總計）。
+                # tick 0 標 (warmup)：首場首 tick 常含 CUDA/lazy init 一次性暖機，非持續算力不足。
+                if n_over:
+                    total_ms = 1000.0 * sum(s for _, s in ep.over_runs)
+                    shown = ep.over_runs[:OVER_PRINT_MAX]
+                    # 每項：超時ms(t<tick索引>)；tick 0 另標 warmup。tick 索引讓人看出尖刺落在早/中/晚段，
+                    # 也能自證 warmup 確實是第 0 tick（而非剛好排在最前面的最大值）。
+                    secs = ", ".join(f"{s * 1000:.1f}(t{idx}{',warmup' if idx == 0 else ''})"
+                                     for idx, s in shown)
+                    tail = (f"  …(前{OVER_PRINT_MAX}/共{n_over}，合計 {total_ms:.1f}ms)"
+                            if n_over > OVER_PRINT_MAX else f"  (合計 {total_ms:.1f}ms)")
+                    log(f"    :  over ticks (ms)= {secs}{tail}")
 
             if len(buf) == 0:                        # 本輪沒有任何可用資料（全失敗/全丟棄/被停）
                 if ctrl.stop:

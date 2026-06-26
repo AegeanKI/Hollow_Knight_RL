@@ -63,6 +63,8 @@ class HollowKnightEnv:
         self.stacker = FrameStacker()
         self.monitor = None
         self._next_t = 0.0
+        self._ep_wall0 = None   # fps 診斷：本場牆鐘起點
+        self._over_runs = []    # fps 診斷：本場各 over-tick 的 (tick_idx, 超出 66.7ms 預算的秒數)
         self._steps = 0
         self._prev_boss = None
         self._prev_player = None
@@ -82,8 +84,12 @@ class HollowKnightEnv:
 
     def _wait_tick(self):
         now = time.perf_counter()
-        if now < self._next_t:
-            time.sleep(self._next_t - now)
+        margin = self._next_t - now             # >0=還有餘裕(會睡)；<=0=這 tick 的工作已爆 66.7ms 預算
+        if margin > 0:
+            time.sleep(margin)
+        else:
+            # 來不及維持 15Hz：記下 (tick_idx, 超出 66.7ms 多少秒)。此時 _steps 尚未 +1，即當前 0-based tick。
+            self._over_runs.append((self._steps, -margin))
         self._next_t += config.TICK_DT
 
     def _sleep_interruptible(self, secs, should_stop):
@@ -121,6 +127,9 @@ class HollowKnightEnv:
                 # eval 場回 1.0（mod 不放大）；訓練場 = 目前難度比例。
                 self._scale = curriculum.effective_scale()
                 self._next_t = time.perf_counter() + config.TICK_DT
+                # fps 診斷：本場第一個 step 進來時記牆鐘起點；累計各 over-tick (idx, 超時秒數)
+                self._ep_wall0 = None
+                self._over_runs = []
                 return self.stacker.get(), {}
             wait = min(1.0 * (attempt + 1), 5.0)     # 退避：1,2,3,4,5,5...
             print(f"  reset 第 {attempt + 1}/{max_retries} 次未成功，{wait:.0f}s 後重試...")
@@ -138,6 +147,8 @@ class HollowKnightEnv:
 
     def step(self, action_vec):
         """action_vec: MultiBinary(11)。回傳 (obs, reward, terminated, truncated, info)。"""
+        if self._ep_wall0 is None:              # fps 診斷：本場第一個 step 進來才起算牆鐘
+            self._ep_wall0 = time.perf_counter()
         if config.TRACE_ACTIONS:
             print(format_action_row(action_vec), flush=True)
         self.act.apply_vec(action_vec)
@@ -156,6 +167,11 @@ class HollowKnightEnv:
         truncated = self._steps >= config.MAX_EPISODE_STEPS
         if terminated or truncated:
             self.act.release_all()
+            # fps 診斷：實測 fps = 步數 / 牆鐘秒數（涵蓋抓圖/推論/送鍵全部開銷）；
+            # over_runs = 各爆預算 tick 的 (idx, 超時秒數)，依超時由大到小。實測 < TICK_HZ 代表某環節吃掉 tick 預算。
+            elapsed = time.perf_counter() - self._ep_wall0 if self._ep_wall0 else 0.0
+            info["fps"] = self._steps / elapsed if elapsed > 0 else 0.0
+            info["over_runs"] = sorted(self._over_runs, key=lambda t: t[1], reverse=True)
         return obs, reward, terminated, truncated, info
 
     def _reward_and_done(self, tele):
