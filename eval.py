@@ -41,7 +41,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ck = torch.load(path, map_location=device)
     ac = ActorCritic().to(device).eval()
-    ac.load_state_dict(ck["model"])
+    ac.load_compat(ck["model"])     # 相容舊 ckpt（privileged-critic 前；eval 只用 actor）
     print(f"評估 {path} (update {ck['update_i']}, ep {ck['ep_i']})")
 
     ctrl = ControlKeys().start()

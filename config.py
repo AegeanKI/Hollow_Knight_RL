@@ -130,3 +130,11 @@ NET_SIZE = 96        # 網路輸入邊長
 FRAME_STACK = 4      # 疊幾張連續幀
 # 輸入通道數：RGB=3 -> 3*FRAME_STACK；灰階=1 -> FRAME_STACK
 NET_CHANNELS = (1 if OBS_GRAYSCALE else 3) * FRAME_STACK
+
+# ---- privileged critic（asymmetric actor-critic）---------------------------------
+# critic（只訓練時算 advantage 用、部署/eval 丟掉）額外吃的特權特徵數，actor 不給 → actor
+# 維持「純看畫面」。順序固定：[scale, boss_hp_frac, player_hp_frac, soul_frac]，全部正規化到
+# [0,1]（env._critic_extra 產生）。動機：agent 看不出難度 scale（0.5/0.55 畫面一樣、價值不同），
+# V(obs) 被迫取平均 → 難度切換時系統性偏 advantage → 觸發棘輪崩潰；把 scale（及順手把 HUD 上
+# 本就有、餵了能降 critic 變異的 boss/player/soul）給 critic，value 就能正確隨難度/戰況變。
+N_CRITIC_EXTRA = 4

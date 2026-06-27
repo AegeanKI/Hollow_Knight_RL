@@ -142,22 +142,26 @@ def collect_one_episode(env, ac, device, should_stop):
     """跑單場訓練戰鬥（動作取樣探索），收集 transitions 與統計。
     回傳 EpisodeData；無法完成（reset 失敗/被中止、或 0 步）回傳 None。
     收不收進 buffer（遙測健康度）由呼叫端決定。"""
-    obs, _ = env.reset(should_stop=should_stop)
+    obs, info0 = env.reset(should_stop=should_stop)
     if obs is None:                              # 自動開場失敗/被中止
         return None
+    extra = info0["critic_extra"]                # privileged critic 特權特徵（與 obs 對齊）
     scale = curriculum.read_scale()              # 這場實際打的難度（開場已定、本場固定）
     boss = BossDamageTracker()
     done, ep_r, steps, info = False, 0.0, 0, {}
     trans = []
     while not done and not should_stop():
         ot = torch.from_numpy(obs).to(device)
-        action, logp, value = ac.act(ot)
+        ext = torch.from_numpy(extra).to(device)
+        action, logp, value = ac.act(ot, ext)
         obs2, r, term, trunc, info = env.step(action)
+        extra2 = info["critic_extra"]
         done = term or trunc
         # 超時(truncation)非真終局：用最後狀態 value bootstrap，避免低估結尾
-        boot = ac.value(torch.from_numpy(obs2).to(device)) if (trunc and not term) else 0.0
-        trans.append((obs, action, logp, r, value, float(done), float(term), boot))
-        obs = obs2; ep_r += r; steps += 1
+        boot = (ac.value(torch.from_numpy(obs2).to(device), torch.from_numpy(extra2).to(device))
+                if (trunc and not term) else 0.0)
+        trans.append((obs, action, logp, r, value, float(done), float(term), boot, extra))
+        obs = obs2; extra = extra2; ep_r += r; steps += 1
         boss.update(info)
     if steps == 0:                               # 0 步（剛 reset 完就被 stop）
         return None
@@ -218,7 +222,13 @@ def main():
 
     if resume_path:
         ck = torch.load(resume_path, map_location=device)
-        ac.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"])
+        adapted = ac.load_compat(ck["model"])
+        if adapted:
+            log("  ⚠ 舊架構 checkpoint（critic 無特權欄）：已 zero-init 新欄 warm-start"
+                "（初始 value 等同舊 critic），並改用全新 optimizer（不載舊 Adam，因 critic"
+                f" 第一層形狀已變）→ 採用 --lr {args.lr}。")
+        else:
+            opt.load_state_dict(ck["opt"])
         update_i, ep_i, best_dmg = ck["update_i"], ck["ep_i"], ck["best_dmg"]
         if "ret_rms" in ck:                       # ① 接續時還原 return 尺度；舊檔沒有就從頭估
             ret_rms.load_state_dict(ck["ret_rms"])

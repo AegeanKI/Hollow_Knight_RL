@@ -35,7 +35,7 @@ def main():
                         config.RL_LATEST_CKPT if args.latest else config.RL_BEST_CKPT)
     ck = torch.load(path, map_location=device)
     ac = ActorCritic().to(device).eval()
-    ac.load_state_dict(ck["model"])
+    ac.load_compat(ck["model"])     # 相容舊 ckpt（privileged-critic 前；eval 只用 actor）
     print(f"載入 {path} (update {ck['update_i']}, best_dmg {ck['best_dmg']:.0f})")
 
     ctrl = ControlKeys().start()

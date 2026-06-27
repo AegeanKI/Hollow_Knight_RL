@@ -58,11 +58,12 @@ class RolloutBuffer:
         self.obs, self.act, self.logp = [], [], []
         self.rew, self.val, self.done = [], [], []
         self.term, self.boot = [], []
+        self.extra = []                  # privileged critic 每步特權特徵 (n_extra,)
 
-    def add(self, obs, act, logp, rew, val, done, term, boot):
+    def add(self, obs, act, logp, rew, val, done, term, boot, extra):
         self.obs.append(obs); self.act.append(act); self.logp.append(logp)
         self.rew.append(rew); self.val.append(val); self.done.append(done)
-        self.term.append(term); self.boot.append(boot)
+        self.term.append(term); self.boot.append(boot); self.extra.append(extra)
 
     def __len__(self):
         return len(self.rew)
@@ -108,6 +109,7 @@ def ppo_update(ac, opt, buffer, device, ret_rms=None, epochs=4, batch_size=256,
 
     obs = torch.as_tensor(np.stack(buffer.obs), dtype=torch.float32)
     act = torch.as_tensor(np.stack(buffer.act), dtype=torch.float32)
+    extra = torch.as_tensor(np.stack(buffer.extra), dtype=torch.float32)   # (N, n_extra)
     old_logp = torch.as_tensor(np.asarray(buffer.logp), dtype=torch.float32)
     adv_t = torch.as_tensor(adv, dtype=torch.float32)
     ret_t = torch.as_tensor(ret, dtype=torch.float32)
@@ -119,10 +121,10 @@ def ppo_update(ac, opt, buffer, device, ret_rms=None, epochs=4, batch_size=256,
         np.random.shuffle(idx)
         for s in range(0, n, batch_size):
             b = idx[s:s + batch_size]
-            ob = obs[b].to(device); ac_b = act[b].to(device)
+            ob = obs[b].to(device); ac_b = act[b].to(device); ex_b = extra[b].to(device)
             olp = old_logp[b].to(device); ad = adv_t[b].to(device); rt = ret_t[b].to(device)
 
-            logp, ent, val = ac.evaluate(ob, ac_b)
+            logp, ent, val = ac.evaluate(ob, ac_b, ex_b)
             ratio = torch.exp(logp - olp)
             s1 = ratio * ad
             s2 = torch.clamp(ratio, 1 - clip, 1 + clip) * ad

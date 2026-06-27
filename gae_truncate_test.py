@@ -15,7 +15,8 @@ def make_buf(term, trunc, boot_val, n=3, rew=1.0, val=5.0):
         tm = float(term and last)
         boot = boot_val if (last and trunc and not term) else 0.0
         buf.add(obs=np.zeros(1, np.float32), act=np.zeros(1, np.float32),
-                logp=0.0, rew=rew, val=val, done=done, term=tm, boot=boot)
+                logp=0.0, rew=rew, val=val, done=done, term=tm, boot=boot,
+                extra=np.zeros(1, np.float32))   # privileged critic 欄；finish() 不用，給 dummy
     return buf
 
 

@@ -69,6 +69,10 @@ class HollowKnightEnv:
         self._prev_boss = None
         self._prev_player = None
         self._scale = 1.0       # 作法A：本場 reward 正規化 scale（reset 時依 curriculum 設定）
+        # privileged critic：特權特徵的「上一步」基準（掉包/未見到時 backfill 用），每場 reset
+        self._prev_boss_frac = 1.0
+        self._prev_player_frac = 1.0
+        self._prev_soul_frac = 0.0
         # B4 遙測健康：每場統計「拿到新鮮遙測的 tick 比例」
         self._tele_ok = 0
         self._tele_total = 0
@@ -76,6 +80,29 @@ class HollowKnightEnv:
         self.reset_fail_count = 0
 
     # ---- 工具 ----
+    def _critic_extra(self, tele):
+        """privileged critic 的特權特徵 (float32[N_CRITIC_EXTRA])，全部正規化到 [0,1]。
+        順序固定 [scale, boss_hp_frac, player_hp_frac, soul_frac]；只給 critic、不給 actor。
+        -1/無效時用上一步、整場沒看過用語意預設（boss/player 滿、soul 0）。
+        boss 直接用 mod 已正規化的 'boss_hp'（=raw/running-max，沒 boss 時送 -1）。
+        soul 正規化分母 = soul_max + soul_reserve_max（soul_total 含主槽+儲備）。"""
+        if tele is not None:
+            bh = tele.get("boss_hp", -1.0)
+            if bh is not None and bh >= 0:
+                self._prev_boss_frac = bh
+            ph, pmax = tele.get("player_hp", -1), tele.get("player_max", -1)
+            if ph >= 0 and pmax and pmax > 0:
+                self._prev_player_frac = ph / pmax
+            st = tele.get("soul_total", -1)
+            smax = tele.get("soul_max", -1) + tele.get("soul_reserve_max", -1)
+            if st is not None and st >= 0 and smax > 0:
+                self._prev_soul_frac = st / smax
+        def clip01(v):
+            return max(0.0, min(1.0, float(v)))
+        return np.array([clip01(self._scale), clip01(self._prev_boss_frac),
+                         clip01(self._prev_player_frac), clip01(self._prev_soul_frac)],
+                        dtype=np.float32)
+
     def _read_tele(self):
         tele, age = self.rx.sample()
         if tele is not None and age < config.TELE_FRESH_SEC:
@@ -130,10 +157,14 @@ class HollowKnightEnv:
                 # 作法A：本場 reward 正規化用的 scale（開場已定、整場固定）。
                 # eval 場回 1.0（mod 不放大）；訓練場 = 目前難度比例。
                 self._scale = curriculum.effective_scale()
+                # privileged critic：每場重置特權特徵的 backfill 基準（_critic_extra 需 _scale 已設好）
+                self._prev_boss_frac = 1.0     # 開場 boss 未生成 → 視為滿血
+                self._prev_player_frac = 1.0   # 開場滿血
+                self._prev_soul_frac = 0.0     # 開場魂預設 0（首個有效遙測即覆蓋）
                 # fps 診斷：時鐘改在第一個 step 才錨定（讓 reset→首次冷推論落在計時外）；此處只清狀態
                 self._ep_wall0 = None
                 self._over_runs = []
-                return self.stacker.get(), {}
+                return self.stacker.get(), {"critic_extra": self._critic_extra(tele)}
             wait = min(1.0 * (attempt + 1), 5.0)     # 退避：1,2,3,4,5,5...
             print(f"  reset 第 {attempt + 1}/{max_retries} 次未成功，{wait:.0f}s 後重試...")
             self._sleep_interruptible(wait, should_stop)
@@ -168,6 +199,7 @@ class HollowKnightEnv:
 
         reward, terminated, info = self._reward_and_done(tele)
         info["tele_drop"] = self.tele_drop_rate()
+        info["critic_extra"] = self._critic_extra(tele)   # privileged critic 特權特徵（本 tick）
         truncated = self._steps >= config.MAX_EPISODE_STEPS
         if terminated or truncated:
             self.act.release_all()
