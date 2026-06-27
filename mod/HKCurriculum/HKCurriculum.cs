@@ -59,12 +59,17 @@ namespace HKCurriculum
         // ---- 可調參數 ----
         private const float ScaleMin = 0.50f;    // 最低降到 50%
         private const float ScaleMax = 1.00f;    // 最高回到 100%
-        private const float ScaleStep = 0.05f;   // 每次調整步階
+        // 步階 0.02（原 0.05）：縮小升難躍變，讓「在能力邊界橫跳」時每趟難度跳更小、
+        // 對 policy 的單趟傷害更小（解棘輪式崩潰；2026-06-27）。代價=爬到滿難度更慢，
+        // 但現階段瓶頸是穩定不是爬速；privileged critic 也讓小步不再造成 value shock。
+        private const float ScaleStep = 0.02f;   // 每次調整步階
         // 滑動勝率視窗（場數）。**必須明顯大於學習尺度(eps/update=8)**，否則升難度後策略
         // 只跑 ~1 次 update 還沒適應就被判「太難」而反覆降回（thrashing）。30≈4 次 update，
         // 給策略時間在新難度學透才評估；還會 ping-pong 就再加大到 40-50。
         private const int Window = 30;
-        private const float RaiseAbove = 0.60f;  // 勝率 > 此 -> 升難度
+        // 升難門檻 0.70（原 0.60）：要求贏得更穩才升，避免一摸到能勝就升進撐不住的難度、
+        // 反覆橫跳硬砸 policy（2026-06-27）。
+        private const float RaiseAbove = 0.70f;  // 勝率 > 此 -> 升難度
         private const float LowerBelow = 0.30f;  // 勝率 < 此 -> 降難度
         private const int BossMinHp = 200;       // 視為 boss 的最低滿血（過濾雜魚）
         private const int WaitFrames = 5;        // 等 FSM 設好滿血再判定是不是 boss 的幀數（實測可調）
