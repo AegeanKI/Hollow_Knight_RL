@@ -91,6 +91,10 @@ class HollowKnightEnv:
             # 來不及維持 15Hz：記下 (tick_idx, 超出 66.7ms 多少秒)。此時 _steps 尚未 +1，即當前 0-based tick。
             self._over_runs.append((self._steps, -margin))
         self._next_t += config.TICK_DT
+        # 凍結後重同步：推進一個 tick 後仍落後 now 超過一整個 tick = 真凍結，
+        # 丟棄積欠、從 now 重新起算，不靠連發(>15Hz)追趕、也免 catch-up 把 log 二次方灌大。
+        if now - self._next_t > config.TICK_DT:
+            self._next_t = now + config.TICK_DT
 
     def _sleep_interruptible(self, secs, should_stop):
         """睡 secs 秒，但能被 should_stop 提早打斷。"""
@@ -126,8 +130,7 @@ class HollowKnightEnv:
                 # 作法A：本場 reward 正規化用的 scale（開場已定、整場固定）。
                 # eval 場回 1.0（mod 不放大）；訓練場 = 目前難度比例。
                 self._scale = curriculum.effective_scale()
-                self._next_t = time.perf_counter() + config.TICK_DT
-                # fps 診斷：本場第一個 step 進來時記牆鐘起點；累計各 over-tick (idx, 超時秒數)
+                # fps 診斷：時鐘改在第一個 step 才錨定（讓 reset→首次冷推論落在計時外）；此處只清狀態
                 self._ep_wall0 = None
                 self._over_runs = []
                 return self.stacker.get(), {}
@@ -147,8 +150,9 @@ class HollowKnightEnv:
 
     def step(self, action_vec):
         """action_vec: MultiBinary(11)。回傳 (obs, reward, terminated, truncated, info)。"""
-        if self._ep_wall0 is None:              # fps 診斷：本場第一個 step 進來才起算牆鐘
+        if self._ep_wall0 is None:              # 本場第一個 step：起算牆鐘 + 錨定 15Hz 時鐘
             self._ep_wall0 = time.perf_counter()
+            self._next_t = self._ep_wall0 + config.TICK_DT   # 錨在此；reset→首次冷推論不計入 t0
         if config.TRACE_ACTIONS:
             print(format_action_row(action_vec), flush=True)
         self.act.apply_vec(action_vec)
