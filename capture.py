@@ -4,7 +4,7 @@ import numpy as np
 from mss import mss
 
 import config
-from keys import find_window_region
+from keys import find_window_region, is_region_occluded
 
 
 class Capturer:
@@ -23,6 +23,11 @@ class Capturer:
         mon = self._sct.monitors[1]
         return {"left": mon["left"], "top": mon["top"],
                 "width": mon["width"], "height": mon["height"]}
+
+    def is_occluded(self):
+        """本擷取區是否被其他視窗 / secure desktop 遮擋。
+        回傳 (occluded: bool, cover_frac: float, reason: str)。"""
+        return is_region_occluded(self.region, config.OCCLUSION_COVER_FRAC)
 
     def grab_raw(self) -> np.ndarray:
         """抓一張原始畫面，回傳 RGB (H, W, 3) uint8。"""

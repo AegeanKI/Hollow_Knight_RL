@@ -111,6 +111,9 @@ def eval_one_episode(env, ac, device, should_stop):
         ot = torch.from_numpy(obs).to(device)
         a, _, _ = ac.act(ot, deterministic=True)
         obs, r, term, trunc, info = env.step(a)
+        if info.get("occluded"):                 # 中途被遮擋：本場 eval 不可信，丟棄重跑
+            env.drain_until_terminal(should_stop)   # 等本場自然結束才回得了大廳
+            return _OCCLUDED
         done = term or trunc
         boss.update(info)
         steps += 1
@@ -128,12 +131,18 @@ def run_eval(env, ac, device, n_eps, should_stop):
     curriculum.begin_eval()
     try:
         res, dmgs, hps, steps = [], [], [], []
-        for _ in range(n_eps):
+        while len(res) < n_eps:
+            if should_stop():
+                break
+            env.wait_until_unoccluded(should_stop)   # gate：被遮擋就等解除再開 eval 場
             if should_stop():
                 break
             ep = eval_one_episode(env, ac, device, should_stop)
             if ep is None:                       # reset 失敗/被中止/0 步 -> 停止評估
                 break
+            if ep is _OCCLUDED:                  # 中途被遮擋 -> 不計、重跑（gate 已等到解除）
+                print("  [EVAL] 中途被遮擋，重跑該場")
+                continue
             result, dmg, end_hp, st = ep
             res.append(result); dmgs.append(dmg); hps.append(end_hp); steps.append(st)
         return res, dmgs, hps, steps
@@ -158,7 +167,11 @@ def eval_key(dmgs, res, hps, steps):
 
 # 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
 # scale=這場實際打的難度（reset 後讀，mod 開場設定後到本場結束才會變）；mod 沒載入則 None
-EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale fps over_runs")
+# occluded=本場中途被畫面遮擋而丟棄（不進 buffer/統計、不計入這次 update 的 8 場）
+EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale fps over_runs occluded")
+EpisodeData.__new__.__defaults__ = (False,)   # occluded 預設 False（正常結束的場不必傳）
+
+_OCCLUDED = object()   # eval：本場中途被遮擋的哨兵回傳（有別於 None=reset 失敗/0 步）
 
 
 def collect_one_episode(env, ac, device, should_stop):
@@ -178,6 +191,10 @@ def collect_one_episode(env, ac, device, should_stop):
         ext = torch.from_numpy(extra).to(device)
         action, logp, value = ac.act(ot, ext)
         obs2, r, term, trunc, info = env.step(action)
+        if info.get("occluded"):                 # 中途被遮擋：obs 已污染 -> 丟棄整場
+            env.drain_until_terminal(should_stop)   # 等本場自然結束（角色站著被打死）才回得了大廳
+            return EpisodeData(trans=[], result="occluded", dmg=0, ep_r=ep_r, steps=steps,
+                               drop=0.0, scale=scale, fps=0.0, over_runs=[], occluded=True)
         extra2 = info["critic_extra"]
         done = term or trunc
         # 超時(truncation)非真終局：用最後狀態 value bootstrap，避免低估結尾
@@ -279,17 +296,24 @@ def main():
             ep_summ = []
             drops = []
             scales = []
-            for _ in range(args.episodes_per_update):
-                if ctrl.stop:                        # 上一場跑完就收到停止 -> 乾淨退出
-                    break
+            valid = 0                                # 真正計入這次 update 的場數（遮擋 drop 不算）
+            while valid < args.episodes_per_update and not ctrl.stop:
                 # 暫停點（episode 之間）：放開所有輸入，等使用者檢查遊戲設定後再續
                 ctrl.wait_while_paused(on_pause=env.act.release_all, log=log)
                 if ctrl.stop:                        # 暫停等待中按了 F10 -> 別再開下一場
+                    break
+                # 遮擋 gate：被其他視窗/secure desktop 蓋住就暫停，等解除再開下一場（避免連環 drop）
+                env.wait_until_unoccluded(ctrl.should_stop, log=log)
+                if ctrl.stop:
                     break
                 ep = collect_one_episode(env, ac, device, ctrl.should_stop)
                 if ep is None:                       # B3：自動開場失敗/被中止/0 步 -> 跳過本場，不崩
                     continue
                 ep_i += 1
+                if ep.occluded:                      # 中途被遮擋：佔個 EP 編號但不計入這 8 場、不進 buffer/統計
+                    log(f"  EP{ep_i}: 中途被遮擋，不計")
+                    continue
+                valid += 1
                 drops.append(ep.drop)
                 scales.append(ep.scale)
                 # B4：遙測掉太兇 -> reward 訊號不可信，整場丟棄不納入更新（但仍記錄）

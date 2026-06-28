@@ -110,6 +110,15 @@ TELE_FRESH_SEC = 1.0
 CURRICULUM_EVAL_FLAG = os.path.join(tempfile.gettempdir(), "hk_curriculum_eval.flag")
 # mod 每場寫出目前難度比例(0.6~1.0)，Python 讀來記進 metrics.csv（分辨「變強」vs「變簡單」）。
 CURRICULUM_SCALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_scale.txt")
+# 偵測到畫面遮擋時 Python 建立此旗標 -> mod 該場 win/lose 不計入自適應勝率
+# （遮擋後會「等輸」自然結束以回大廳，不擋掉的話會被當成真敗、亂降難度）。
+CURRICULUM_DROP_FLAG = os.path.join(tempfile.gettempdir(), "hk_curriculum_drop.flag")
+
+# ---- 畫面遮擋偵測 (keys.is_region_occluded) ----------------------------------
+# 擷取區被其他視窗（z-order 在 HK 之上）覆蓋的比例 >= 此值 -> 視為遮擋（T1 幾何重疊）。
+# 另有 T2：輸入 desktop 非 'Default'（UAC secure desktop / 鎖定畫面）一律視為遮擋。
+# 2% 容忍角落小通知/常駐 overlay，全屏覆蓋（選單/拖曳/截圖/UAC）一定抓得到。
+OCCLUSION_COVER_FRAC = 0.02
 
 # ---- 資料存放 ----------------------------------------------------------------
 DATA_DIR = "data"          # 錄製的 demo 存這裡

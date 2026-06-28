@@ -91,11 +91,13 @@ namespace HKCurriculum
         private bool _fightActive;
         private bool _resolved;
         private bool _evalThisFight;
+        private bool _dropThisFight;    // Python 偵測到畫面遮擋 -> 本場 win/lose 不計入勝率
 
         private string _stateFile;     // 持久化難度+勝率視窗（mod 目錄，停/續訓/重開不重置）
         private string _logFile;       // 每場輸贏的歷史紀錄（append；給事後分析）
         private string _scaleOutFile;  // 寫目前 scale 供 Python 讀來記 log（temp）
         private string _evalFlagFile;  // Python 寫此檔 -> 本場用 100% 且不計入（temp）
+        private string _dropFlagFile;  // Python 寫此檔 -> 本場（遮擋）不計入勝率，但難度照舊（temp）
 
         // 完整路徑取現在場景名（避免被 HK 自己的同名 SceneManager 型別遮蔽）
         private static string ActiveScene() =>
@@ -109,6 +111,7 @@ namespace HKCurriculum
             _logFile = Path.Combine(dir, "curriculum_log.csv");
             _scaleOutFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_scale.txt");
             _evalFlagFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_eval.flag");
+            _dropFlagFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_drop.flag");
             LoadState();
             WriteScaleOut();
         }
@@ -132,6 +135,7 @@ namespace HKCurriculum
             if (hm == null || hm.hp < BossMinHp) yield break;        // 不是 boss（雜魚），跳過
 
             _evalThisFight = File.Exists(_evalFlagFile);             // 本場 eval -> 不放大、不計入
+            _dropThisFight = false;                                  // 新一場：清掉上一場的遮擋旗標
             _boss = hm;
             _fightActive = true;
             _resolved = false;
@@ -168,10 +172,15 @@ namespace HKCurriculum
             {
                 // 離開戰鬥場景：重置本場狀態（沒結算的就當棄場、不計）
                 _fightActive = false;
+                _dropThisFight = false;
                 _handled.Clear();
                 return;
             }
             if (!_fightActive || _resolved) return;
+
+            // 遮擋旗標：Python 偵測到畫面被遮擋後寫此檔，閂住 -> 本場（即將「等輸」的敗）不計入勝率。
+            // 用閂的（看到一次就記住），Python 之後清檔的時機就不必精準。
+            if (!_dropThisFight && File.Exists(_dropFlagFile)) _dropThisFight = true;
 
             var pd = PlayerData.instance;
             int playerHp = pd != null ? pd.health : -1;
@@ -184,6 +193,11 @@ namespace HKCurriculum
         {
             _resolved = true;
             _fightActive = false;
+            if (_dropThisFight)
+            {
+                _mod.Info($"[curriculum] dropped fight (win={win})：畫面遮擋，不計入自適應");
+                return;
+            }
             if (_evalThisFight)
             {
                 _mod.Info($"[curriculum] eval fight done (win={win})，不計入自適應");

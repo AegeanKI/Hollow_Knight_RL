@@ -25,6 +25,23 @@ def end_eval():
         pass
 
 
+def begin_drop():
+    """偵測到畫面遮擋時建立旗標：mod 看到後該場 win/lose 不計入自適應勝率。
+    與 begin_eval 同機制（檔案交握），但不強制 100% 血量——只「不計入」。"""
+    try:
+        open(config.CURRICULUM_DROP_FLAG, "w").close()
+    except OSError:
+        pass
+
+
+def end_drop():
+    """移除遮擋旗標（沒有也安全）。每場 reset 前清掉，確保新一場正常計入。"""
+    try:
+        os.remove(config.CURRICULUM_DROP_FLAG)
+    except OSError:
+        pass
+
+
 def read_scale():
     """讀目前難度比例(0.5~1.0)；mod 沒載入/讀不到回 None。"""
     try:

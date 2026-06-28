@@ -157,6 +157,7 @@ class HollowKnightEnv:
         （讓訓練端優雅跳過本場/停止，而不是讓整個 session 崩潰）。
         """
         self.act.release_all()
+        curriculum.end_drop()     # 清掉上一場可能留下的遮擋旗標，確保新一場正常計入勝負
         for attempt in range(max_retries):
             if should_stop and should_stop():
                 return None, {}
@@ -196,6 +197,33 @@ class HollowKnightEnv:
             return 0.0
         return 1.0 - self._tele_ok / self._tele_total
 
+    def wait_until_unoccluded(self, should_stop=None, log=print):
+        """若擷取區被遮擋（其他視窗 / secure desktop），放開輸入並阻塞到解除或收到停止。
+        用在 episode 之間（reset 前）當 gate，避免一蓋就連環 drop。回傳是否真的等過。"""
+        occ, frac, reason = self.cap.is_occluded()
+        if not occ:
+            return False
+        self.act.release_all()
+        log(f"⏸ 偵測到遮擋（{reason}，覆蓋 {frac:.0%}），暫停等待解除...")
+        while occ and not (should_stop and should_stop()):
+            time.sleep(0.2)
+            occ, frac, reason = self.cap.is_occluded()
+        if not (should_stop and should_stop()):
+            log("▶ 遮擋解除，繼續。")
+        return True
+
+    def drain_until_terminal(self, should_stop=None):
+        """中途遮擋後：放開輸入、空跑到本場自然結束（角色站著被打死）才回得了大廳。
+        不收集 transition、不送輸入；以遙測(monitor)判終止——與畫面遮擋無關。有步數上限保險。"""
+        self.act.release_all()
+        for _ in range(config.MAX_EPISODE_STEPS):
+            if should_stop and should_stop():
+                return
+            self._wait_tick()
+            tele = self._read_tele()
+            if self.monitor and self.monitor.update(tele) in ("win", "lose", "left"):
+                return
+
     def step(self, action_vec):
         """action_vec: MultiBinary(11)。回傳 (obs, reward, terminated, truncated, info)。"""
         if self._ep_wall0 is None:              # 本場第一個 step：起算牆鐘 + 錨定 15Hz 時鐘
@@ -217,6 +245,15 @@ class HollowKnightEnv:
         reward, terminated, info = self._reward_and_done(tele)
         info["tele_drop"] = self.tele_drop_rate()
         info["critic_extra"] = self._critic_extra(tele)   # privileged critic 特權特徵（本 tick）
+        # 畫面遮擋偵測（T1 幾何重疊 + T2 secure desktop）：本 tick 的 obs 已被覆蓋視窗污染。
+        # 放開輸入、設旗標讓 mod 本場不計勝負，回報 occluded 讓呼叫端丟棄整場（並「等輸」回大廳）。
+        occ, ofrac, oreason = self.cap.is_occluded()
+        if occ:
+            self.act.release_all()
+            curriculum.begin_drop()
+            info["occluded"] = True
+            info["occ_frac"] = ofrac
+            info["occ_reason"] = oreason
         truncated = self._steps >= config.MAX_EPISODE_STEPS
         if terminated or truncated:
             self.act.release_all()
