@@ -86,21 +86,26 @@ def _open_csv():
     return f, w
 
 
-def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg, ret_rms=None):
+def save_ckpt(path, ac, opt, update_i, ep_i, best_dmg, ret_rms=None, best_key=None):
     ck = {"model": ac.state_dict(), "opt": opt.state_dict(),
           "update_i": update_i, "ep_i": ep_i, "best_dmg": best_dmg}
     if ret_rms is not None:
         ck["ret_rms"] = ret_rms.state_dict()      # ① return 正規化狀態（接續才一致）
+    if best_key is not None:
+        ck["best_key"] = list(best_key)           # rl_best 比較鍵（avg傷害,勝場,勝場剩血,-勝場用時）
     torch.save(ck, path)
 
 
 def eval_one_episode(env, ac, device, should_stop):
-    """跑單場決定性（不取樣）戰鬥，回傳 (result, damage)。
-    無法完成（reset 失敗/被中止、或 0 步）回傳 None。"""
+    """跑單場決定性（不取樣）戰鬥，回傳 (result, damage, end_hp, steps)。
+    end_hp = 整場最後一個有效剩餘血量(player_hp>0)：贏的那 tick 可能因遙測掉包而 player_hp=-1，
+    故追蹤 last-valid 值（迴圈在判定終局當下即 break，不會吃到重生回滿血的殘影）。
+    steps = 本場 tick 數（用時，÷15=秒）。無法完成（reset 失敗/被中止、或 0 步）回傳 None。"""
     obs, _ = env.reset(should_stop=should_stop)
     if obs is None:                              # reset 失敗/被中止
         return None
     boss = BossDamageTracker()
+    steps, last_hp = 0, -1
     done, info = False, {}
     while not done and not should_stop():
         ot = torch.from_numpy(obs).to(device)
@@ -108,29 +113,47 @@ def eval_one_episode(env, ac, device, should_stop):
         obs, r, term, trunc, info = env.step(a)
         done = term or trunc
         boss.update(info)
+        steps += 1
+        p = info.get("player_hp", -1)
+        if p > 0:                                # 只記有效剩餘血量；避開贏 tick 偶發的 -1
+            last_hp = p
     if not info:                                 # 0 步（一進去就被 stop）
         return None
-    return info["result"], boss.dmg
+    return info["result"], boss.dmg, last_hp, steps
 
 
 def run_eval(env, ac, device, n_eps, should_stop):
-    """跑 n_eps 場決定性評估，回傳 (results, damages)。
+    """跑 n_eps 場決定性評估，回傳 (results, damages, end_hps, steps)。
     全程設 curriculum eval 旗標 -> boss 固定 100% 滿血、不計入自適應難度。"""
     curriculum.begin_eval()
     try:
-        res, dmgs = [], []
+        res, dmgs, hps, steps = [], [], [], []
         for _ in range(n_eps):
             if should_stop():
                 break
             ep = eval_one_episode(env, ac, device, should_stop)
             if ep is None:                       # reset 失敗/被中止/0 步 -> 停止評估
                 break
-            result, dmg = ep
-            res.append(result)
-            dmgs.append(dmg)
-        return res, dmgs
+            result, dmg, end_hp, st = ep
+            res.append(result); dmgs.append(dmg); hps.append(end_hp); steps.append(st)
+        return res, dmgs, hps, steps
     finally:
         curriculum.end_eval()
+
+
+def eval_key(dmgs, res, hps, steps):
+    """rl_best 的比較鍵（tuple，高者勝）：
+       (平均傷害, 勝場數, 勝場平均剩餘血量, -勝場平均用時)。
+    avg 傷害當主鍵（贏=滿額傷害故已含勝場、且小樣本下比勝場數平滑）；同分時依序比
+    勝場多→勝場剩血多→勝場用時少。剩血/用時只在勝場上算（敗場無意義）；0 勝時後兩項=0
+    → 完全退化成「只比 avg 傷害」（等同舊行為）。"""
+    avg_dmg = float(np.mean(dmgs))
+    wins = sum(1 for r in res if r == "win")
+    win_hp = [h for r, h in zip(res, hps) if r == "win" and h >= 0]
+    win_st = [s for r, s in zip(res, steps) if r == "win"]
+    avg_hp = float(np.mean(win_hp)) if win_hp else 0.0
+    avg_st = float(np.mean(win_st)) if win_st else 0.0
+    return (avg_dmg, wins, avg_hp, -avg_st)
 
 
 # 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
@@ -209,6 +232,7 @@ def main():
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr)
     ret_rms = RunningMeanStd()                    # ① return 正規化的跑動尺度
     update_i, ep_i, best_dmg = 0, 0, -1.0
+    best_key = (-1.0, 0, 0.0, 0.0)                 # rl_best 比較鍵；任何真實 eval 都會勝過初值
 
     # 決定要從哪載入：--ckpt 指定 > --resume(latest) > 從 BC 初始化
     resume_path = None
@@ -232,6 +256,8 @@ def main():
         update_i, ep_i, best_dmg = ck["update_i"], ck["ep_i"], ck["best_dmg"]
         if "ret_rms" in ck:                       # ① 接續時還原 return 尺度；舊檔沒有就從頭估
             ret_rms.load_state_dict(ck["ret_rms"])
+        # rl_best 比較鍵：舊 ckpt 無 best_key → 用 best_dmg 推導（後三項 0，等同舊「只比 avg 傷害」基準）
+        best_key = tuple(ck["best_key"]) if "best_key" in ck else (best_dmg, 0, 0.0, 0.0)
         log(f"接續訓練 from {resume_path}：update={update_i} ep={ep_i} best_dmg={best_dmg:.0f}")
     else:
         bc = torch.load(os.path.join(config.CKPT_DIR, config.BC_CKPT), map_location=device)
@@ -323,33 +349,41 @@ def main():
             if drop_mean > TELE_DROP_WARN:
                 log(f"  ⚠ 本輪平均遙測掉包 {drop_mean:.0%}，請檢查 reward mod / UDP 是否正常。")
 
-            save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
+            save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
             if args.snapshot_every > 0 and update_i % args.snapshot_every == 0:
                 snap = os.path.join(config.CKPT_DIR, f"rl_u{update_i:04d}.pt")
-                save_ckpt(snap, ac, opt, update_i, ep_i, best_dmg, ret_rms)
+                save_ckpt(snap, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
                 log(f"  保存快照 {snap}")
 
-            # ---- B6：rl_best 由「決定性評估的傷害」選出，而非訓練取樣的 avg_dmg ----
+            # ---- B6：rl_best 由「決定性評估」選出。比較鍵＝(avg傷害,勝場,勝場剩血,-勝場用時)，
+            #          avg 傷害主導、同分才比後三項（見 eval_key）。 ----
             eval_dmg = eval_max = eval_wins = eval_n = None
             if args.eval_every > 0 and update_i % args.eval_every == 0 and not ctrl.stop:
-                res, dmgs = run_eval(env, ac, device, args.eval_episodes,
-                                     should_stop=ctrl.should_stop)
+                res, dmgs, hps, steps = run_eval(env, ac, device, args.eval_episodes,
+                                                 should_stop=ctrl.should_stop)
                 if dmgs:
                     eval_dmg, eval_max = float(np.mean(dmgs)), float(np.max(dmgs))
                     eval_wins, eval_n = sum(1 for r in res if r == "win"), len(res)
+                    win_hp = [h for r, h in zip(res, hps) if r == "win" and h >= 0]
+                    win_st = [s for r, s in zip(res, steps) if r == "win"]
+                    hp_tag = f" 勝場剩血={np.mean(win_hp):.1f}" if win_hp else ""
+                    st_tag = f" 勝場用時={np.mean(win_st):.0f}步" if win_st else ""
                     log(f"  [EVAL] avg_dmg={eval_dmg:.0f} max={eval_max:.0f} "
-                        f"wins={eval_wins}/{eval_n} results={res}")
-                    if eval_dmg > best_dmg:
-                        best_dmg = eval_dmg
-                        save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
-                        log(f"  ★ 新最佳(eval)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
-                        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)  # 同步 latest 的 best 欄
+                        f"wins={eval_wins}/{eval_n}{hp_tag}{st_tag} results={res}")
+                    key = eval_key(dmgs, res, hps, steps)
+                    if key > best_key:
+                        best_key, best_dmg = key, eval_dmg
+                        save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
+                        log(f"  ★ 新最佳(eval) avg={best_dmg:.0f} wins={eval_wins}"
+                            f"{hp_tag}{st_tag}，存 rl_best.pt")
+                        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)  # 同步 latest
             elif args.eval_every == 0:
-                # 沒開 eval 的退路：退回用訓練 avg_dmg 維持 best（legacy 行為）
-                if avg_dmg > best_dmg:
-                    best_dmg = avg_dmg
-                    save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
-                    save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
+                # 沒開 eval 的退路：退回用訓練 avg_dmg 維持 best（legacy；勝場/剩血/用時記 0）
+                key = (avg_dmg, 0, 0.0, 0.0)
+                if key > best_key:
+                    best_key, best_dmg = key, avg_dmg
+                    save_ckpt(BEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
+                    save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
                     log(f"  ★ 新最佳(train)平均傷害 {best_dmg:.0f}，存 rl_best.pt")
 
             # ---- C8：每次 update 寫一列到 metrics.csv ----
@@ -369,7 +403,7 @@ def main():
             csvf.flush()
     finally:
         env.close()
-        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms)
+        save_ckpt(LATEST, ac, opt, update_i, ep_i, best_dmg, ret_rms, best_key)
         log(f"已停止並存檔。update={update_i} ep={ep_i}")
         csvf.close()
         logf.close()
