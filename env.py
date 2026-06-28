@@ -22,36 +22,53 @@ from telemetry import TelemetryReceiver
 
 
 class BossDamageTracker:
-    """累積一場戰鬥對 boss 造成的總傷害。
+    """累積一場戰鬥對 boss 造成的總傷害。dmg = 滿血 - 最新血量；獲勝直接回滿血。
 
-    記下第一個有效血量(boss0)與最新血量(last)，dmg = boss0 - last。
-    boss_hp_raw 取自 env 的 step info（<0 表示這 tick 還沒看到 boss）。
+    **滿血基準用 mod 的 `boss_max`（其內部 running-max ＝真實滿血，boss 生成那刻就抓到、
+    早於 agent 揮第一刀）**，而非首次觀測值 boss0——後者若 Python 第一幀晚抓到（已挨一刀）
+    會偏低、且每場零頭不一，使「全勝時 avg 傷害無法精確打平、tiebreaker 失效」。boss_max
+    每場恆定 → 全勝 avg 精確相等 → rl_best 的剩血/用時 tiebreaker 可靠接手。boss0 留作
+    boss_max 沒拿到時的後備。
 
-    win 例外：尾刀常在兩次 15Hz 取樣間擊殺、boss 隨即消失，last 停在死前
-    剩血(>0) → 少算最後一塊（甚至 lose 的 dmg 看起來比 win 還高）。win 代表
-    boss 血量全清，真實傷害就是 boss0，故獲勝時直接回傳 boss0。
+    win 例外：尾刀常在兩次 15Hz 取樣間擊殺、boss 隨即消失，last 停在死前剩血(>0) → 少算
+    最後一塊（甚至 lose 的 dmg 看起來比 win 還高）。win 代表血量全清，故獲勝直接回滿血。
     """
     def __init__(self):
-        self.boss0 = None       # 第一個有效(>=0)的 boss 血量
-        self.last = -1          # 最新一次的 boss 血量
+        self.boss0 = None       # 第一個有效(>=0)的 boss 血量（後備基準）
+        self.boss_max = -1      # mod 的 running-max 滿血（主基準，每場恆定）
+        self.last = -1          # 最新一次的有效 boss 血量
         self.won = False        # 本場是否獲勝（boss 血量全清）
 
     def update(self, info):
         hp = info.get("boss_hp_raw", -1)
         if self.boss0 is None and hp >= 0:
             self.boss0 = hp
-        self.last = hp
+        if hp >= 0:
+            self.last = hp                          # 只記有效值，避免 -1 污染
+        bm = info.get("boss_max", -1)
+        if bm > 0:
+            self.boss_max = max(self.boss_max, bm)  # running-max（boss_max 本就恆定，取 max 保險）
         if info.get("result") == "win":
             self.won = True
         return self
 
     @property
+    def _full(self):
+        # 優先用 mod 的 boss_max（真實滿血、每場一致）；沒拿到才退回首次觀測 boss0
+        if self.boss_max > 0:
+            return self.boss_max
+        return self.boss0
+
+    @property
     def dmg(self):
-        if self.boss0 is None:
+        full = self._full
+        if not full or full <= 0:
             return 0
         if self.won:                       # 獲勝 = boss 滿血全被打掉
-            return self.boss0
-        return self.boss0 - self.last
+            return full
+        if self.last < 0:                  # 整場沒拿到有效 boss 血量 → 無法估
+            return 0
+        return max(0, full - self.last)
 
 
 class HollowKnightEnv:
@@ -212,7 +229,8 @@ class HollowKnightEnv:
 
     def _reward_and_done(self, tele):
         r = config.RW_TIME
-        info = {"result": None, "boss_hp_raw": self._prev_boss, "player_hp": self._prev_player}
+        info = {"result": None, "boss_hp_raw": self._prev_boss, "player_hp": self._prev_player,
+                "boss_max": -1}
         if tele is None:
             return r, False, info
 
@@ -222,6 +240,7 @@ class HollowKnightEnv:
             info["boss_hp_raw"] = boss
         if player >= 0:
             info["player_hp"] = player
+        info["boss_max"] = tele.get("boss_max", -1)   # mod 的 running-max 滿血；給 BossDamageTracker 當基準
 
         # 造成傷害（兩端都有效時才算，避免 -1 sentinel 造成爆衝）。
         # 作法A：×_scale 把「被 mod 放大的 boss 掉血」還原成真實傷害，低難度不再多領。
