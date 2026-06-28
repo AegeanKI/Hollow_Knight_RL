@@ -56,24 +56,34 @@ namespace HKCurriculum
 
     public class CurriculumPump : MonoBehaviour
     {
-        // ---- 可調參數 ----
-        private const float ScaleMin = 0.50f;    // 最低降到 50%
-        private const float ScaleMax = 1.00f;    // 最高回到 100%
-        // 步階 0.02（原 0.05）：縮小升難躍變，讓「在能力邊界橫跳」時每趟難度跳更小、
-        // 對 policy 的單趟傷害更小（解棘輪式崩潰；2026-06-27）。代價=爬到滿難度更慢，
-        // 但現階段瓶頸是穩定不是爬速；privileged critic 也讓小步不再造成 value shock。
-        private const float ScaleStep = 0.02f;   // 每次調整步階
-        // 滑動勝率視窗（場數）。**必須明顯大於學習尺度(eps/update=8)**，否則升難度後策略
-        // 只跑 ~1 次 update 還沒適應就被判「太難」而反覆降回（thrashing）。30≈4 次 update，
-        // 給策略時間在新難度學透才評估；還會 ping-pong 就再加大到 40-50。
-        private const int Window = 30;
-        // 升難門檻 0.70（原 0.60）：要求贏得更穩才升，避免一摸到能勝就升進撐不住的難度、
-        // 反覆橫跳硬砸 policy（2026-06-27）。
-        private const float RaiseAbove = 0.70f;  // 勝率 > 此 -> 升難度
-        private const float LowerBelow = 0.30f;  // 勝率 < 此 -> 降難度
-        private const int BossMinHp = 200;       // 視為 boss 的最低滿血（過濾雜魚）
-        private const int WaitFrames = 5;        // 等 FSM 設好滿血再判定是不是 boss 的幀數（實測可調）
-        private const float PollInterval = 1f / 15f;
+        // ---- 可調參數（Init 時從 curriculum_config.txt 讀；不存在則寫預設）----
+        // 預設值＝下面的初始化值；改參數編輯 config 檔即可、不必重 build。完整語意見舊註解/memory。
+        private float ScaleMin = 0.50f;          // 最低降到 50%
+        private float ScaleMax = 1.00f;          // 最高回到 100%
+        private float ScaleStep = 0.02f;         // 每次調整步階（小步解棘輪崩潰）
+        private int Window = 30;                  // 滑動勝率視窗（須 > eps/update=8，否則 thrashing）
+        private float RaiseAbove = 0.70f;        // 勝率 > 此 -> 升難度
+        private float LowerBelow = 0.30f;        // 勝率 < 此 -> 降難度
+        private int BossMinHp = 200;             // 視為 boss 的最低滿血（過濾雜魚）
+        private int WaitFrames = 5;              // 等 FSM 設好滿血再判定是不是 boss 的幀數
+        private float PollInterval = 1f / 15f;
+
+        // ---- 殘局模式 (finale practice) 參數（同檔讀）----
+        private int FinaleEvery = 0;             // >0：確定性「每 N 場(非eval)第 N 場殘局」；0=停用。第一場永遠正常(wasReady)
+        private float FinaleBossHpMin = 0.20f;   // 殘局 boss 起始當前血佔真實滿血比例 [min,max]
+        private float FinaleBossHpMax = 0.50f;
+        private float FinalePlayerHpMin = 0.20f; // 殘局玩家起始血比例 [min,max]，會 clamp 成 <= bossFrac
+        private float FinalePlayerHpMax = 0.50f;
+        private float FinaleOpeningDelay = 2.0f; // 殘局：等開場(FSM 離開 intro)的 fallback 上限秒數
+        private float FinaleSettleDelay = 0.3f;  // 殘局：設殘血/移位後再等這秒數讓物理/遙測/面具穩定才 arm
+        private readonly System.Random _rng = new System.Random();
+
+        // 場地座標（第一場正常戰鬥 capture；殘局放位置用）。未就緒前一律強制正常場。
+        private bool _arenaReady;
+        private float _floorY;
+        private float _arenaXMin, _arenaXMax;
+        private bool _finaleThisFight;           // 本場是否殘局
+        private int _fightCounter;               // 非 eval 戰鬥計數（finale_every 確定性週期用；重啟歸零）
 
         // 目標 boss 場景（對應 Python config.HORNET_SCENES）
         private static readonly HashSet<string> BossScenes =
@@ -82,7 +92,7 @@ namespace HKCurriculum
         private HKCurriculum _mod;
         private float _accum;
 
-        public float Scale { get; private set; } = ScaleMax;
+        public float Scale { get; private set; } = 1.00f;   // 真值由 LoadConfig/LoadState 設（預設＝ScaleMax）
         private readonly Queue<bool> _results = new Queue<bool>();   // true=win
         private readonly HashSet<int> _handled = new HashSet<int>(); // 本場已處理的 enemy 實例
 
@@ -98,6 +108,10 @@ namespace HKCurriculum
         private string _scaleOutFile;  // 寫目前 scale 供 Python 讀來記 log（temp）
         private string _evalFlagFile;  // Python 寫此檔 -> 本場用 100% 且不計入（temp）
         private string _dropFlagFile;  // Python 寫此檔 -> 本場（遮擋）不計入勝率，但難度照舊（temp）
+        private string _configFile;    // 可調參數（mod 目錄；不存在則寫預設，編輯後重啟生效）
+        private string _finaleFile;    // 殘局握手：mod 寫 finale/armed/true_max 供 Python reset 反應（temp）
+        private string _probeFile;     // 場地/開場 FSM 候選值 dump（mod 目錄；給人工挑正確欄位）
+        private string _hudProbeFile;  // 血量 HUD FSM dump（mod 目錄；找面具重畫事件用）
 
         // 完整路徑取現在場景名（避免被 HK 自己的同名 SceneManager 型別遮蔽）
         private static string ActiveScene() =>
@@ -109,10 +123,16 @@ namespace HKCurriculum
             string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             _stateFile = Path.Combine(dir, "curriculum_state.txt");
             _logFile = Path.Combine(dir, "curriculum_log.csv");
+            _configFile = Path.Combine(dir, "curriculum_config.txt");
+            _probeFile = Path.Combine(dir, "arena_probe.txt");
+            _hudProbeFile = Path.Combine(dir, "hud_probe.txt");
             _scaleOutFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_scale.txt");
             _evalFlagFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_eval.flag");
             _dropFlagFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_drop.flag");
+            _finaleFile = Path.Combine(Path.GetTempPath(), "hk_curriculum_finale.txt");
+            LoadConfig();          // 在 LoadState 之前（ScaleMin/ScaleMax 給 clamp 用）
             LoadState();
+            Scale = Mathf.Clamp(Scale, ScaleMin, ScaleMax);   // 無 state 檔時 Scale 仍是初值，夾進 config 範圍
             WriteScaleOut();
         }
 
@@ -128,7 +148,8 @@ namespace HKCurriculum
             StartCoroutine(SetupFightAfterInit(hm));
         }
 
-        // 等 FSM 設好滿血後，確認是 boss 並記錄起來（不動血量；傷害放大在 TakeDamage hook 做）
+        // 等 FSM 設好滿血後，確認是 boss 並記錄起來。正常場不動血量（傷害放大在 TakeDamage hook 做）；
+        // 殘局場降當前血 + 隨機位置 + 等開場跑完才 arm（細節見專案 progress.md「殘局模式」）。
         private IEnumerator SetupFightAfterInit(HealthManager hm)
         {
             for (int i = 0; i < WaitFrames; i++) yield return null;
@@ -136,12 +157,284 @@ namespace HKCurriculum
 
             _evalThisFight = File.Exists(_evalFlagFile);             // 本場 eval -> 不放大、不計入
             _dropThisFight = false;                                  // 新一場：清掉上一場的遮擋旗標
+            _resolved = false;
+            int trueMax = hm.hp;                                     // 降血前的真實滿血（FSM 已設好）
+
+            // 第一場：強制正常，capture 場地座標 + dump 候選值（給日後挑正確欄位）。
+            // 用 wasReady 快照：CaptureArena 會把 _arenaReady 設 true，但「本場」仍須算第一場（強制正常）。
+            bool wasReady = _arenaReady;
+            if (!_arenaReady) { CaptureArena(hm); DumpArenaProbe(hm); }
+
+            // 場次計數（eval 不算進殘局週期）。第一場 counter=1（wasReady=false → 仍強制正常）。
+            if (!_evalThisFight) _fightCounter++;
+            // 殘局：eval 永不、第一場永不（wasReady）；finale_every>0 時「每 N 場的第 N 場」。
+            _finaleThisFight = !_evalThisFight && wasReady
+                               && FinaleEvery > 0 && (_fightCounter % FinaleEvery == 0);
+
+            if (!_finaleThisFight)                                   // 正常場（含 eval）：與原行為完全一致
+            {
+                WriteFinaleFile(false, true, trueMax);              // armed=1：Python 不等
+                _boss = hm;
+                _fightActive = true;
+                float mn = DamageMultiplier();
+                _mod.Info($"[curriculum] fight start: bossHp={hm.hp} "
+                          + (_evalThisFight ? "EVAL 100% dmg×1.00" : $"scale={Scale:0.00} dmg×{mn:0.00}"));
+                yield break;
+            }
+
+            // ---- 殘局場 ----
+            WriteFinaleFile(true, false, trueMax);                  // 先告知 Python：殘局、尚未 armed
+            _finaleCount++;
+            // 等 boss 離開開場 state（FSM ActiveStateName 含 "intro"；GG_Hornet 是 "GG Intro 1 Stun"）
+            // 才算開場跑完、進戰鬥態 → 提早放行（排除開場 free-hit 優勢）。需先「看過」intro 才認它離開，
+            // 避免 FSM 還沒進 intro 就誤判結束。偵測不到（state 名不符）→ 退回 finale_opening_delay 當上限。
+            _lastFsmLog = -1f;
+            bool sawIntro = false;
+            for (float t = 0f; t < FinaleOpeningDelay; t += Time.unscaledDeltaTime)
+            {
+                if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }   // boss 消失，棄→當正常
+                if (_finaleCount <= FsmProbeFights) LogBossFsmState(hm, t);
+                bool inIntro = BossInIntro(hm);
+                if (inIntro) sawIntro = true;
+                else if (sawIntro) break;                                            // 看過 intro 且已離開＝開場結束
+                yield return null;
+            }
+            if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }
+
+            // 殘血：boss frac∈[min,max]；player frac∈[min, min(max,bossFrac)]（保證 player ≤ boss）
+            float bossFrac = RandRange(FinaleBossHpMin, FinaleBossHpMax);
+            float playerFrac = RandRange(FinalePlayerHpMin, Mathf.Min(FinalePlayerHpMax, bossFrac));
+            hm.hp = Mathf.Max(1, Mathf.RoundToInt(trueMax * bossFrac));
+            SetPlayerHp(playerFrac);
+            PlaceCombatants(hm);
+            // 等幾幀讓角色落地、物理/遙測/面具穩定，再 arm → Python 抓的首 obs 是穩定落地狀態
+            // （非半空下墜）、遙測也已反映降血/移位（PlaceCombatants 放在 floorY+1 靠重力沉下）。
+            for (float s = 0f; s < FinaleSettleDelay; s += Time.unscaledDeltaTime)
+            {
+                if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }
+                yield return null;
+            }
+
             _boss = hm;
             _fightActive = true;
-            _resolved = false;
             float m = DamageMultiplier();
-            _mod.Info($"[curriculum] fight start: bossHp={hm.hp} "
-                      + (_evalThisFight ? "EVAL 100% dmg×1.00" : $"scale={Scale:0.00} dmg×{m:0.00}"));
+            _mod.Info($"[curriculum] FINALE start: bossHp={hm.hp}/{trueMax}({bossFrac:0.00}) "
+                      + $"playerFrac={playerFrac:0.00} scale={Scale:0.00} dmg×{m:0.00}");
+            WriteFinaleFile(true, true, trueMax);                  // armed：Python 可以開始
+        }
+
+        private float _lastFsmLog = -1f;
+        private int _finaleCount;                 // 跑過幾場殘局（用來只在前幾場 dump FSM state）
+        private const int FsmProbeFights = 5;     // 只在前 N 場殘局記 boss FSM state 到 probe
+
+        private float RandRange(float a, float b) =>
+            (b <= a) ? a : a + (float)_rng.NextDouble() * (b - a);
+
+        // 殘局：設玩家當前血為滿血×frac（vision-only 下遙測讀 pd.health 即準；HUD 同步待 probe 驗證）
+        private void SetPlayerHp(float frac)
+        {
+            var pd = PlayerData.instance;
+            if (pd == null) return;
+            int max = pd.maxHealth;
+            pd.health = Mathf.Clamp(Mathf.RoundToInt(max * frac), 1, max);
+            if (!_hudProbed) { _hudProbed = true; DumpHudFsms(); }   // 保留：首場 dump 供日後參考
+            RefreshHealthHud();   // 直接寫 pd.health 不會重畫面具 → 送 HERO DAMAGED 讓面具重算
+        }
+
+        private bool _hudProbed;
+
+        // 直接寫 pd.health 不會讓血量面具重畫；送 "HERO DAMAGED" 給 11 個 health_display FSM，
+        // 讓每個面具依 pd.health 重新判定 full/empty（與正常受傷的重畫路徑相同，但不真的扣血/無 i-frame）。
+        private void RefreshHealthHud()
+        {
+            try
+            {
+                var t = FindTypeByName("PlayMakerFSM");
+                var send = t?.GetMethod("SendEvent", new[] { typeof(string) });
+                var nameProp = t?.GetProperty("FsmName");
+                if (send == null || nameProp == null) return;
+                foreach (var o in UnityEngine.Object.FindObjectsOfType(t))
+                    if ((nameProp.GetValue(o, null) as string) == "health_display")
+                        send.Invoke(o, new object[] { "HERO DAMAGED" });
+            }
+            catch { }
+        }
+
+        // 反射 dump HUD 上「血量」相關 PlayMakerFSM（owner/FsmName/事件名），找重畫面具的事件。
+        private void DumpHudFsms()
+        {
+            try
+            {
+                var t = FindTypeByName("PlayMakerFSM");
+                if (t == null) { File.WriteAllText(_hudProbeFile, "PlayMakerFSM type not found\n"); return; }
+                var all = UnityEngine.Object.FindObjectsOfType(t);
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("# HUD probe：找血量面具 HUD 的刷新事件（owner 或 FsmName 含 health 的 FSM）");
+                foreach (var o in all)
+                {
+                    var comp = o as Component;
+                    string go = comp != null ? comp.gameObject.name : "?";
+                    string fsm = t.GetProperty("FsmName")?.GetValue(o, null) as string ?? "?";
+                    if ((go + fsm).ToLower().IndexOf("health") < 0) continue;
+                    sb.Append($"GO={go} FSM={fsm} events=[");
+                    if (t.GetProperty("FsmEvents")?.GetValue(o, null) is System.Collections.IEnumerable evs)
+                        foreach (var e in evs)
+                            sb.Append((e.GetType().GetProperty("Name")?.GetValue(e, null) as string) + ",");
+                    sb.AppendLine("]");
+                }
+                File.WriteAllText(_hudProbeFile, sb.ToString());
+                _mod?.Info($"[curriculum] HUD probe dumped -> {_hudProbeFile}");
+            }
+            catch (Exception e) { _mod?.Info($"[curriculum] HUD probe failed: {e.Message}"); }
+        }
+
+        private static Type FindTypeByName(string name)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types; }  // 取已載入的(含 null)，別整個 assembly 跳過（Assembly-CSharp 常丟這個）
+                catch { continue; }
+                foreach (var tp in types) if (tp != null && tp.Name == name) return tp;
+            }
+            return null;
+        }
+
+        // 殘局：把玩家與 boss 放到場地內隨機 x（保證間距）、地板稍上方，讓重力沉下去。
+        private void PlaceCombatants(HealthManager hm)
+        {
+            var hero = HeroController.instance;
+            if (hero == null || hm == null) return;
+            float margin = 2f, minSep = 4f;
+            float lo = _arenaXMin + margin, hi = _arenaXMax - margin;
+            if (hi <= lo) { lo = _arenaXMin; hi = _arenaXMax; }
+            float px = RandRange(lo, hi), bx = RandRange(lo, hi);
+            for (int g = 0; Mathf.Abs(bx - px) < minSep && g < 10; g++) bx = RandRange(lo, hi);
+            var hp = hero.transform.position;
+            hero.transform.position = new Vector3(px, _floorY + 1f, hp.z);
+            var bp = hm.transform.position;
+            hm.transform.position = new Vector3(bx, _floorY + 1f, bp.z);
+        }
+
+        // 第一場 capture 場地座標：floor y 用開場玩家落地 y；x 範圍 v1 用玩家 x±8 後備
+        // （真正的 arena x-bounds（CameraLockArea）待 probe dump 確認欄位後再換上）。
+        private void CaptureArena(HealthManager hm)
+        {
+            var hero = HeroController.instance;
+            float cx = 0f;
+            if (hero != null) { _floorY = hero.transform.position.y; cx = hero.transform.position.x; }
+            _arenaXMin = cx - 8f; _arenaXMax = cx + 8f;   // 後備：玩家 x±8
+            TryCameraLockBounds();                          // 有 CameraLockArea 就覆寫成真 arena x-bounds
+            _arenaReady = true;
+            _mod?.Info($"[curriculum] arena: floorY={_floorY:0.0} xRange=[{_arenaXMin:0.0},{_arenaXMax:0.0}]");
+        }
+
+        // 用場上最寬的 CameraLockArea 的 cameraXMin/cameraXMax 當 arena x 範圍（反射，不硬引用型別）。
+        // 找不到型別/欄位 → 保留 x±8 後備並把真欄位名 log 出來供修正。
+        private void TryCameraLockBounds()
+        {
+            try
+            {
+                var t = FindTypeByName("CameraLockArea");
+                if (t == null) return;
+                const BindingFlags BF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var fMin = t.GetField("cameraXMin", BF);
+                var fMax = t.GetField("cameraXMax", BF);
+                if (fMin == null || fMax == null)
+                {
+                    _mod?.Info("[curriculum] CameraLockArea fields: "
+                               + string.Join(",", Array.ConvertAll(t.GetFields(BF), f => f.Name)));
+                    return;
+                }
+                var areas = UnityEngine.Object.FindObjectsOfType(t);
+                float bestSpan = -1f, bMin = 0f, bMax = 0f;
+                foreach (var o in areas)
+                {
+                    float xmin = Convert.ToSingle(fMin.GetValue(o));
+                    float xmax = Convert.ToSingle(fMax.GetValue(o));
+                    if (xmax - xmin > bestSpan) { bestSpan = xmax - xmin; bMin = xmin; bMax = xmax; }
+                }
+                _mod?.Info($"[curriculum] CameraLockArea: {areas.Length} areas, span={bestSpan:0.0}");
+                if (bestSpan > 0f) { _arenaXMin = bMin; _arenaXMax = bMax; }
+            }
+            catch (Exception e) { _mod?.Info($"[curriculum] CameraLockArea read failed: {e.Message}"); }
+        }
+
+        // 第一場 dump 可確認的座標候選值到檔（CameraLockArea/GameManager x-bounds、FSM state 名待補反射）
+        private void DumpArenaProbe(HealthManager hm)
+        {
+            if (File.Exists(_probeFile)) return;   // 只寫一次（已拿到場地資訊就不再覆寫）
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("# arena probe (第一場 capture)；用來挑殘局放位置的正確場地欄位");
+                sb.AppendLine($"scene = {ActiveScene()}");
+                var hero = HeroController.instance;
+                if (hero != null) sb.AppendLine($"hero.pos = {hero.transform.position}  (floorY={_floorY})");
+                if (hm != null) sb.AppendLine($"boss.pos = {hm.transform.position}  hp={hm.hp}");
+                var pd = PlayerData.instance;
+                if (pd != null) sb.AppendLine($"player hp={pd.health}/{pd.maxHealth}");
+                sb.AppendLine($"arena x range (v1 fallback) = [{_arenaXMin}, {_arenaXMax}]");
+                sb.AppendLine("# TODO: 反射 dump CameraLockArea / GameManager.sceneWidth 拿真 x-bounds");
+                File.WriteAllText(_probeFile, sb.ToString());
+                _mod.Info($"[curriculum] arena probe dumped -> {_probeFile}");
+            }
+            catch (Exception e) { _mod.Info($"[curriculum] probe dump failed: {e.Message}"); }
+        }
+
+        // 殘局開場期間：反射記錄 boss 各 PlayMakerFSM 的 ActiveStateName（不引用 PlayMaker，純反射），
+        // 約每 0.25s 一筆 append 到 probe；給日後把「固定延遲」升級成「偵測 FSM 離開開場 state」。
+        // boss 是否還在開場 state：任一 boss PlayMakerFSM 的 ActiveStateName 含 "intro"（不分大小寫）。
+        // 反射讀（不引用 PlayMaker），只看 boss 自己的 FSM components（非全域）。
+        private bool BossInIntro(HealthManager hm)
+        {
+            if (hm == null) return false;
+            try
+            {
+                var t = FindTypeByName("PlayMakerFSM");
+                var stateProp = t?.GetProperty("ActiveStateName");
+                if (stateProp == null) return false;
+                foreach (var c in hm.GetComponents<MonoBehaviour>())
+                {
+                    if (c == null || c.GetType().Name != "PlayMakerFSM") continue;
+                    var sn = stateProp.GetValue(c, null) as string;
+                    if (sn != null && sn.ToLower().Contains("intro")) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private void LogBossFsmState(HealthManager hm, float t)
+        {
+            if (hm == null || (_lastFsmLog >= 0f && t - _lastFsmLog < 0.25f)) return;
+            _lastFsmLog = t;
+            try
+            {
+                var sb = new System.Text.StringBuilder($"[fsm t={t:0.0}] ");
+                foreach (var c in hm.GetComponents<MonoBehaviour>())
+                {
+                    if (c == null) continue;
+                    var ct = c.GetType();
+                    if (ct.Name != "PlayMakerFSM") continue;
+                    var fn = ct.GetProperty("FsmName")?.GetValue(c, null) as string;
+                    var sn = ct.GetProperty("ActiveStateName")?.GetValue(c, null) as string;
+                    sb.Append($"{fn}:{sn} ");
+                }
+                File.AppendAllText(_probeFile, sb.ToString() + "\n");
+            }
+            catch { }
+        }
+
+        private void WriteFinaleFile(bool finale, bool armed, int trueMax)
+        {
+            try
+            {
+                File.WriteAllText(_finaleFile,
+                    $"finale={(finale ? 1 : 0)}\narmed={(armed ? 1 : 0)}\ntrue_max={trueMax}\n");
+            }
+            catch { }
         }
 
         // 是這場的 boss 就把傷害乘上 1/scale（eval 或 scale=1 不放大）。HK 傷害是整數 -> round。
@@ -203,6 +496,11 @@ namespace HKCurriculum
                 _mod.Info($"[curriculum] eval fight done (win={win})，不計入自適應");
                 return;
             }
+            if (_finaleThisFight)
+            {
+                _mod.Info($"[curriculum] finale fight done (win={win})，不計入自適應");
+                return;
+            }
             _results.Enqueue(win);
             while (_results.Count > Window) _results.Dequeue();
             AdjustScale();
@@ -236,6 +534,98 @@ namespace HKCurriculum
             else if (wr < LowerBelow) Scale = Mathf.Max(ScaleMin, Scale - ScaleStep);
             else return;                             // 死區：不動、也不清空（繼續滑動評估）
             if (Scale != before) _results.Clear();   // 只有真的升/降才清空；觸頂/觸底沒變不清
+        }
+
+        // ---- 可調參數 config（不存在則寫預設；編輯後重啟 HK 生效）----
+        private void LoadConfig()
+        {
+            var kv = new Dictionary<string, string>();
+            try
+            {
+                if (File.Exists(_configFile))
+                    foreach (var line in File.ReadAllLines(_configFile))
+                    {
+                        var t = line.Trim();
+                        if (t.Length == 0 || t.StartsWith("#")) continue;
+                        int eq = t.IndexOf('=');
+                        if (eq > 0) kv[t.Substring(0, eq).Trim()] = t.Substring(eq + 1).Trim();
+                    }
+            }
+            catch { }
+            ScaleMin = GetF(kv, "scale_min", ScaleMin);
+            ScaleMax = GetF(kv, "scale_max", ScaleMax);
+            ScaleStep = GetF(kv, "scale_step", ScaleStep);
+            Window = GetI(kv, "window", Window);
+            RaiseAbove = GetF(kv, "raise_above", RaiseAbove);
+            LowerBelow = GetF(kv, "lower_below", LowerBelow);
+            BossMinHp = GetI(kv, "boss_min_hp", BossMinHp);
+            WaitFrames = GetI(kv, "wait_frames", WaitFrames);
+            PollInterval = GetF(kv, "poll_interval", PollInterval);
+            FinaleEvery = GetI(kv, "finale_every", FinaleEvery);
+            FinaleBossHpMin = GetF(kv, "finale_boss_hp_min", FinaleBossHpMin);
+            FinaleBossHpMax = GetF(kv, "finale_boss_hp_max", FinaleBossHpMax);
+            FinalePlayerHpMin = GetF(kv, "finale_player_hp_min", FinalePlayerHpMin);
+            FinalePlayerHpMax = GetF(kv, "finale_player_hp_max", FinalePlayerHpMax);
+            FinaleOpeningDelay = GetF(kv, "finale_opening_delay", FinaleOpeningDelay);
+            FinaleSettleDelay = GetF(kv, "finale_settle_delay", FinaleSettleDelay);
+            if (!File.Exists(_configFile)) WriteDefaultConfig();
+            _mod?.Info($"[curriculum] config: scaleMin={ScaleMin:0.00} step={ScaleStep:0.00} "
+                       + $"window={Window} raise={RaiseAbove:0.00} finaleEvery={FinaleEvery}");
+        }
+
+        private static float GetF(Dictionary<string, string> kv, string k, float dflt) =>
+            kv.TryGetValue(k, out var v) &&
+            float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) ? f : dflt;
+
+        private static int GetI(Dictionary<string, string> kv, string k, int dflt) =>
+            kv.TryGetValue(k, out var v) &&
+            int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : dflt;
+
+        private void WriteDefaultConfig()
+        {
+            try
+            {
+                string I(float f) => f.ToString(CultureInfo.InvariantCulture);
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("# HKCurriculum 可調參數。編輯後重啟 HK 生效。註解須自成一行（# 開頭）；");
+                sb.AppendLine("# 不可寫成 key=value # 註解，否則值會含註解字串而解析失敗、退回預設。");
+                sb.AppendLine("# === 自適應難度（作法D：放大傷害壓縮整場）===");
+                sb.AppendLine("# scale 下限/上限：難度比例範圍。0.50=傷害放大2倍最好贏；1.00=真實滿難度。");
+                sb.AppendLine($"scale_min={I(ScaleMin)}");
+                sb.AppendLine($"scale_max={I(ScaleMax)}");
+                sb.AppendLine("# 每次升/降難的步階。小步(0.02)較穩、解棘輪崩潰；想爬快可 0.05（風險：橫跳硬砸 policy）。");
+                sb.AppendLine($"scale_step={I(ScaleStep)}");
+                sb.AppendLine("# 滑動勝率視窗(場)。須 > eps/update(8) 否則 thrashing。建議 30；還 ping-pong 就 40-50。");
+                sb.AppendLine($"window={Window}");
+                sb.AppendLine("# 勝率 > raise_above 升難 / < lower_below 降難（中間死區維持）。建議 0.70 / 0.30。");
+                sb.AppendLine($"raise_above={I(RaiseAbove)}");
+                sb.AppendLine($"lower_below={I(LowerBelow)}");
+                sb.AppendLine("# 視為 boss 的最低滿血(過濾雜魚)；等 FSM 設好滿血的幀數。一般不用動。");
+                sb.AppendLine($"boss_min_hp={BossMinHp}");
+                sb.AppendLine($"wait_frames={WaitFrames}");
+                sb.AppendLine("# 勝負輪詢間隔(秒)。1/15≈0.0667=15Hz，對齊控制頻率即可。");
+                sb.AppendLine($"poll_interval={I(PollInterval)}");
+                sb.AppendLine("# === 殘局模式 (finale practice)：殘血開局練收尾 ===");
+                sb.AppendLine("# 注意：Python 端 config.FINALE_ENABLED 也要 True 才會啟用握手。");
+                sb.AppendLine("# finale_every>0：確定性「每 N 場(非eval)的第 N 場殘局」(固定順序)。0=停用。");
+                sb.AppendLine("# 例 5＝前4場正常、第5場殘局。第一場永遠正常(不受此值影響)。");
+                sb.AppendLine($"finale_every={FinaleEvery}");
+                sb.AppendLine("# 殘局 boss 起始當前血佔真實滿血的比例 [min,max]。建議 0.20-0.50（中後段殊死局）。");
+                sb.AppendLine($"finale_boss_hp_min={I(FinaleBossHpMin)}");
+                sb.AppendLine($"finale_boss_hp_max={I(FinaleBossHpMax)}");
+                sb.AppendLine("# 殘局玩家起始血比例 [min,max]。實際會 clamp 成 <= 該場 bossFrac（保證玩家≤boss、練殊死）。");
+                sb.AppendLine($"finale_player_hp_min={I(FinalePlayerHpMin)}");
+                sb.AppendLine($"finale_player_hp_max={I(FinalePlayerHpMax)}");
+                sb.AppendLine("# 開場等待上限(秒)：實際是等 boss FSM 離開開場 state(含 intro)才放行、提早結束；");
+                sb.AppendLine("# 此值僅當 FSM 偵測不到時的 fallback 上限。建議 2.0。");
+                sb.AppendLine("# ★必須 < Python config.FINALE_ARM_TIMEOUT(6.0)，否則 Python 等不到 armed 會當正常場。");
+                sb.AppendLine($"finale_opening_delay={I(FinaleOpeningDelay)}");
+                sb.AppendLine("# 設殘血/移位後再等幾秒讓物理(角色落地)/遙測/面具穩定才 arm。建議 0.3。");
+                sb.AppendLine($"finale_settle_delay={I(FinaleSettleDelay)}");
+                File.WriteAllText(_configFile, sb.ToString());
+                _mod?.Info($"[curriculum] wrote default config -> {_configFile}");
+            }
+            catch { }
         }
 
         // ---- 持久化 / 檔案交握 ----

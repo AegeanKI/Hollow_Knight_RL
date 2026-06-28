@@ -168,8 +168,8 @@ def eval_key(dmgs, res, hps, steps):
 # 一場訓練 episode 收集到的資料（trans=PPO transitions；其餘為統計用）
 # scale=這場實際打的難度（reset 後讀，mod 開場設定後到本場結束才會變）；mod 沒載入則 None
 # occluded=本場中途被畫面遮擋而丟棄（不進 buffer/統計、不計入這次 update 的 8 場）
-EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale fps over_runs occluded")
-EpisodeData.__new__.__defaults__ = (False,)   # occluded 預設 False（正常結束的場不必傳）
+EpisodeData = namedtuple("EpisodeData", "trans result dmg ep_r steps drop scale fps over_runs occluded finale")
+EpisodeData.__new__.__defaults__ = (False, False)   # (occluded, finale) 預設 False
 
 _OCCLUDED = object()   # eval：本場中途被遮擋的哨兵回傳（有別於 None=reset 失敗/0 步）
 
@@ -207,7 +207,8 @@ def collect_one_episode(env, ac, device, should_stop):
         return None
     return EpisodeData(trans=trans, result=info["result"], dmg=boss.dmg,
                        ep_r=ep_r, steps=steps, drop=info.get("tele_drop", 0.0), scale=scale,
-                       fps=info.get("fps", 0.0), over_runs=info.get("over_runs", []))
+                       fps=info.get("fps", 0.0), over_runs=info.get("over_runs", []),
+                       finale=info.get("finale", False))
 
 
 def parse_args():
@@ -323,16 +324,17 @@ def main():
                         buf.add(*tr)
                 flag = ("" if ep.drop <= TELE_DROP_WARN
                         else f"  ⚠遙測掉包{ep.drop:.0%}" + ("（已丟棄本場）" if not healthy else ""))
-                ep_summ.append((ep.result, ep.dmg, ep.ep_r, ep.steps, healthy))
+                ep_summ.append((ep.result, ep.dmg, ep.ep_r, ep.steps, healthy, ep.finale))
                 # 括號內 = 實際打出的傷害 = dmg×scale（扣掉作法D的放大；跨 scale 可比）
                 real_tag = f" ({ep.dmg * ep.scale:.0f})" if ep.scale is not None else ""
                 scale_tag = f" scale={ep.scale:.2f}" if ep.scale is not None else ""
+                fin_tag = " [殘局]" if ep.finale else ""   # 標出殘局場（解釋為何傷害/血量異於正常場）
                 # 實測 fps：低於目標(<14) 或有 tick 爆預算 時加 ⚠，提醒某環節太慢拖垮 15Hz
                 n_over = len(ep.over_runs)
                 fps_warn = "⚠" if (ep.fps < config.TICK_HZ - 1 or n_over > 0) else ""
                 fps_tag = f" fps={ep.fps:4.1f}{fps_warn}" + (f"(over{n_over})" if n_over else "")
                 log(f"  EP{ep_i}: {str(ep.result):>5} dmg={ep.dmg:4.0f}{real_tag} "
-                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{fps_tag}{flag}{scale_tag}")
+                    f"reward={ep.ep_r:6.2f} steps={ep.steps}{fps_tag}{flag}{scale_tag}{fin_tag}")
                 # 第二行：各 over-tick 超出 66.7ms 預算多少 ms，由大到小（過多時截斷，附總計）。
                 # tick 0 標 (warmup)：首場首 tick 常含 CUDA/lazy init 一次性暖機，非持續算力不足。
                 if n_over:
@@ -353,12 +355,15 @@ def main():
                 continue
             st = ppo_update(ac, opt, buf, device, ret_rms=ret_rms, ent_coef=args.ent_coef)
             update_i += 1
-            used = [e for e in ep_summ if e[4]]      # 真正納入更新的（遙測健康）場
-            avg_dmg = float(np.mean([d for _, d, _, _, _ in used])) if used else 0.0
-            wins = sum(1 for r, _, _, _, _ in used if r == "win")
+            # 正常場指標只算「健康且非殘局」場（殘局是殘血開局、傷害/勝率與正常場不可比，分開算）。
+            # 殘局場的 transitions 仍已進 buffer（上面 buf.add）= 照樣提供梯度，只是不混進顯示指標。
+            used = [e for e in ep_summ if e[4] and not e[5]]
+            avg_dmg = float(np.mean([d for _, d, _, _, _, _ in used])) if used else 0.0
+            wins = sum(1 for r, _, _, _, _, _ in used if r == "win")
+            fin = [e for e in ep_summ if e[4] and e[5]]   # 健康的殘局場（分開統計）
             drop_mean = float(np.mean(drops)) if drops else 0.0
             # 括號內 = 實際傷害平均 = 逐場 dmg×scale 再平均（扣掉作法D放大；跨 scale 可比）
-            real = [d * s for (_, d, _, _, h), s in zip(ep_summ, scales) if h and s is not None]
+            real = [d * s for (_, d, _, _, h, fl), s in zip(ep_summ, scales) if h and not fl and s is not None]
             avg_real = float(np.mean(real)) if real else None
             real_tag = f" ({avg_real:.0f})" if avg_real is not None else ""
             # 本輪各場實際難度（每場開場時讀）；可能在 update 中途被調過，故 log 顯示範圍
@@ -370,6 +375,10 @@ def main():
                 f"pi={st['pi_loss']:.3f} vf={st['vf_loss']:.3f} ent={st['entropy']:.2f} "
                 f"kl={st['kl']:.3f} retσ={st['ret_std']:.1f} tele_drop={drop_mean:.0%}"
                 + (f" scale={scale_str}" if scale_str else ""))
+            if fin:                                  # 殘局場分開印（不混進上面正常場指標）
+                fin_wins = sum(1 for r, _, _, _, _, _ in fin if r == "win")
+                fin_dmg = float(np.mean([d for _, d, _, _, _, _ in fin]))
+                log(f"  [殘局] {len(fin)} 場 wins={fin_wins}/{len(fin)} avg_dmg={fin_dmg:.0f}")
             if drop_mean > TELE_DROP_WARN:
                 log(f"  ⚠ 本輪平均遙測掉包 {drop_mean:.0%}，請檢查 reward mod / UDP 是否正常。")
 

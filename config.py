@@ -114,6 +114,19 @@ CURRICULUM_SCALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_scale
 # （遮擋後會「等輸」自然結束以回大廳，不擋掉的話會被當成真敗、亂降難度）。
 CURRICULUM_DROP_FLAG = os.path.join(tempfile.gettempdir(), "hk_curriculum_drop.flag")
 
+# ---- 殘局模式 (finale practice) ----------------------------------------------
+# 定向探索：讓 agent 從「殘血中後段」開局，多採樣最常死的收尾段（破 scale 0.70 平牆）。
+# 總閘：False 時 env.reset 完全不碰殘局邏輯（正常路徑逐位元不變）。要啟用須同時把 mod
+# config 的 finale_prob 設 >0 + 重 build mod + 重啟 HK。mod 決定殘局、Python 純反應。
+FINALE_ENABLED = True
+# mod 每場 fight-detect 寫此檔（finale=0/1、armed=0/1、true_max=int）；Python reset 反應。
+CURRICULUM_FINALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_finale.txt")
+# 殘局 reset 等 armed（mod 設好殘局）的逾時秒數：等不到（mod 舊版未寫/未載入）就當正常場
+# 跑，安全降級（FINALE_ENABLED 關時根本不會走到這）。
+# ★必須 > mod 的 finale_opening_delay（預設 2.0），否則 mod 還在等開場、Python 已逾時當正常場，
+#   兩端對本場是否殘局的認知會不一致。預設 6.0 給足餘裕。
+FINALE_ARM_TIMEOUT = 6.0
+
 # ---- 畫面遮擋偵測 (keys.is_region_occluded) ----------------------------------
 # 擷取區被其他視窗（z-order 在 HK 之上）覆蓋的比例 >= 此值 -> 視為遮擋（T1 幾何重疊）。
 # 另有 T2：輸入 desktop 非 'Default'（UAC secure desktop / 鎖定畫面）一律視為遮擋。

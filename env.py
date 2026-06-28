@@ -86,6 +86,9 @@ class HollowKnightEnv:
         self._prev_boss = None
         self._prev_player = None
         self._scale = 1.0       # 作法A：本場 reward 正規化 scale（reset 時依 curriculum 設定）
+        self._finale = False    # 殘局模式：本場是否為殘血開局（mod 決定，reset 握手取得）
+        self._true_max = -1     # 殘局：mod 降血前 capture 的真實滿血（握手帶來；目前僅診斷用，
+                                #        指標基準改用 boss0=殘血起始，見 step 的 boss_max=-1）
         # privileged critic：特權特徵的「上一步」基準（掉包/未見到時 backfill 用），每場 reset
         self._prev_boss_frac = 1.0
         self._prev_player_frac = 1.0
@@ -158,17 +161,32 @@ class HollowKnightEnv:
         """
         self.act.release_all()
         curriculum.end_drop()     # 清掉上一場可能留下的遮擋旗標，確保新一場正常計入勝負
+        curriculum.clear_finale() # 清上一場殘局握手檔（避免讀到舊狀態）
         for attempt in range(max_retries):
             if should_stop and should_stop():
                 return None, {}
             if start_challenge(self.cap, self.act, self.rx):
                 self.reset_fail_count = 0
+                # 放掉 start_challenge 導航殘留的按鍵：殘局等 armed 的開場窗期間 agent 沒在送鍵，
+                # 殘留鍵會被手把後端 hold 住害角色自己動 → 此處清掉，等待窗角色才靜止。
+                self.act.release_all()
+                # 殘局握手：總閘關閉時完全跳過 → 正常路徑逐位元不變。開啟時等 mod 設好殘局
+                # （或判定為正常場）才抓首 obs，讓首 obs = 殘局起始狀態、且跳過開場優勢視窗。
+                self._finale, self._true_max = False, -1
+                if config.FINALE_ENABLED:
+                    self._finale, self._true_max = curriculum.wait_for_armed(should_stop)
                 self.monitor = EpisodeMonitor()
                 self.stacker.reset()
                 self.stacker.push(self.cap.grab_raw())
                 tele = self._read_tele()
                 self._prev_boss = tele.get("boss_hp_raw", -1) if tele else -1
                 self._prev_player = tele.get("player_hp", -1) if tele else -1
+                if self._finale:
+                    # 殘局：mod 剛把 boss/player 當前血改小，reset 當下遙測可能仍是改血前舊值。
+                    # 設 -1 → 首 step 不計血量 delta（_reward_and_done 以 >=0 guard 掉），避免把
+                    # 「mod 降血」誤算成 agent 造成的傷害/掉血＝假 reward；首 step 後由新遙測接管。
+                    self._prev_boss = -1
+                    self._prev_player = -1
                 self._steps = 0
                 self._tele_ok = 0
                 self._tele_total = 0
@@ -243,6 +261,11 @@ class HollowKnightEnv:
             self._tele_ok += 1
 
         reward, terminated, info = self._reward_and_done(tele)
+        info["finale"] = self._finale
+        if self._finale:
+            # 殘局傷害基準改用 boss0(=降血後的起始殘血，BossDamageTracker 的後備基準)，讓 [殘局] 指標
+            # ＝agent 實際打的殘局傷害；若用 boss_max(running-max=真實滿血) 會把 mod 預先扣掉的血也算進去。
+            info["boss_max"] = -1
         info["tele_drop"] = self.tele_drop_rate()
         info["critic_extra"] = self._critic_extra(tele)   # privileged critic 特權特徵（本 tick）
         # 畫面遮擋偵測（T1 幾何重疊 + T2 secure desktop）：本 tick 的 obs 已被覆蓋視窗污染。

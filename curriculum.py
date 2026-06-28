@@ -42,6 +42,56 @@ def end_drop():
         pass
 
 
+def _read_finale():
+    """讀 mod 寫的殘局握手檔，回 {finale:bool, armed:bool, true_max:int}；讀不到回 None。"""
+    try:
+        d = {}
+        with open(config.CURRICULUM_FINALE_FILE) as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    d[k] = v
+        return {"finale": d.get("finale") == "1",
+                "armed": d.get("armed") == "1",
+                "true_max": int(d.get("true_max", "-1"))}
+    except (OSError, ValueError):
+        return None
+
+
+def clear_finale():
+    """reset 前清掉上一場的殘局握手檔（避免讀到舊狀態）。沒有也安全。"""
+    try:
+        os.remove(config.CURRICULUM_FINALE_FILE)
+    except OSError:
+        pass
+
+
+def wait_for_armed(should_stop=None, timeout=None):
+    """殘局握手（只在 config.FINALE_ENABLED 時由 env.reset 呼叫）。回 (is_finale, true_max)。
+
+    流程（mod 在 fight-detect 才寫檔，故有 race，要等）：
+      - 等 mod 寫出握手檔。
+      - finale=0 → 正常場，立即回 (False, -1)。
+      - finale=1 → 等 armed=1（mod 設好殘局 HP/位置/過完開場）才回 (True, true_max)。
+      - 逾時/讀不到（mod 舊版未寫、未載入）→ 當正常場 (False, -1)，安全降級。
+    """
+    import time
+    if timeout is None:
+        timeout = config.FINALE_ARM_TIMEOUT
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < timeout:
+        if should_stop and should_stop():
+            return False, -1
+        st = _read_finale()
+        if st is not None:
+            if not st["finale"]:
+                return False, -1
+            if st["armed"]:
+                return True, st["true_max"]
+        time.sleep(0.05)
+    return False, -1   # 逾時：安全當正常場跑
+
+
 def read_scale():
     """讀目前難度比例(0.5~1.0)；mod 沒載入/讀不到回 None。"""
     try:
