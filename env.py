@@ -89,7 +89,7 @@ class HollowKnightEnv:
         self._finale = False    # 殘局模式：本場是否為殘血開局（mod 決定，reset 握手取得）
         self._true_max = -1     # 殘局：mod 降血前 capture 的真實滿血（握手帶來；僅診斷用，
                                 #        指標基準改用 boss0=殘血起始，見 step 的 boss_max=-1）
-        self._finale_boss_frac = -1.0   # 殘局：boss 起始血占真實滿血比例（mod 握手帶來），用來按比例縮殘局贏分
+        self._finale_boss_frac = -1.0   # 殘局：boss 起始血占真實滿血比例（mod 握手帶來）；僅供 ARMED 遙測 log，不進 reward
         # privileged critic：特權特徵的「上一步」基準（掉包/未見到時 backfill 用），每場 reset
         self._prev_boss_frac = 1.0
         self._prev_player_frac = 1.0
@@ -338,16 +338,18 @@ class HollowKnightEnv:
 
         result = self.monitor.update(tele)
         terminated = result in ("win", "lose", "left")
-        # 作法A：贏弱化版不值錢(×scale)、輸弱化版更痛(/scale，設上限防龜縮)
+        # 作法A：贏弱化版不值錢(×scale)、輸弱化版更痛(/scale，設上限防龜縮)。
+        # 殘局贏分＝全額 RW_WIN×scale，與正常場後段收尾完全一致（finale = 正常場「後半」、非另一種較易
+        # 的局）。曾試過殘局贏分 ×boss_frac，已撤——理由：(1) 逐刀傷害分(RW_DMG×Δboss×scale)本就隨收掉
+        # 血量等比(少打少領)，已自動把「殘局較短」算進去，再縮贏分＝雙重折扣；(2) RW_WIN 是「存活/獲勝」
+        # 的固定收尾 premium(逃「打傷害到死」鞍點)、非「殺多少血」的計件，按剩血縮是分類錯誤；(3) boss_frac
+        # 量的是 boss 剩血，不是讓 finale 真正較易的「玩家血 head-start」＝錯的旋鈕；(4) critic 無 finale
+        # 旗標，殘局與正常後段同輸入卻不同 return → value-aliasing(殘局占低血樣本~40% 把後段 V 拉低、扭曲
+        # advantage、正好在最弱的收尾段)；維持全額讓兩路 return 一致＝從源頭消 aliasing、免加第 5 個 critic
+        # 特徵。殘局「較易」的殘留(玩家 head-start)若實測過獎，用 return 正規化/降 finale 頻率治、別再 reward
+        # shaping。lose 不動。(`_finale_boss_frac` 仍保留供 ARMED 遙測 log，只是不再進 reward。)
         if result == "win":
-            win_bonus = config.RW_WIN * self._scale
-            if self._finale and self._finale_boss_frac > 0:
-                # 殘局：按 boss 起始血占滿血的比例縮收尾紅利（少血殘局＝要收的少→紅利等比少），
-                # 消「局簡單卻領滿額 RW_WIN」失真。逐刀傷害分本就隨血量等比，故只縮這個固定贏分；
-                # lose 刻意不動——縮 win 已讓 lose 相對更重，再加大 lose 會教出怕死龜縮、害收尾。
-                # boss_frac<=0＝舊版 mod 未送此欄 → fallback 不縮（安全降級）。
-                win_bonus *= self._finale_boss_frac
-            r += win_bonus
+            r += config.RW_WIN * self._scale
         elif result == "lose":
             r -= min(config.RW_LOSE / self._scale, config.RW_LOSE_CAP)
         info["result"] = result
