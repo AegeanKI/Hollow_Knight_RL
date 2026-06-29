@@ -43,7 +43,10 @@ def end_drop():
 
 
 def _read_finale():
-    """讀 mod 寫的殘局握手檔，回 {finale:bool, armed:bool, true_max:int}；讀不到回 None。"""
+    """讀 mod 寫的殘局握手檔，回 {finale:bool, armed:bool, true_max:int, boss_frac:float}；讀不到回 None。
+
+    boss_frac＝殘局 boss 起始血占真實滿血的比例（mod 降血時抽的值，armed 時才有效；正常/未 armed=-1）。
+    """
     try:
         d = {}
         with open(config.CURRICULUM_FINALE_FILE) as f:
@@ -53,7 +56,8 @@ def _read_finale():
                     d[k] = v
         return {"finale": d.get("finale") == "1",
                 "armed": d.get("armed") == "1",
-                "true_max": int(d.get("true_max", "-1"))}
+                "true_max": int(d.get("true_max", "-1")),
+                "boss_frac": float(d.get("boss_frac", "-1"))}
     except (OSError, ValueError):
         return None
 
@@ -67,13 +71,15 @@ def clear_finale():
 
 
 def wait_for_armed(should_stop=None, timeout=None):
-    """殘局握手（只在 config.FINALE_ENABLED 時由 env.reset 呼叫）。回 (is_finale, true_max)。
+    """殘局握手（只在 config.FINALE_ENABLED 時由 env.reset 呼叫）。回 (is_finale, true_max, boss_frac)。
 
     流程（mod 在 fight-detect 才寫檔，故有 race，要等）：
       - 等 mod 寫出握手檔。
-      - finale=0 → 正常場，立即回 (False, -1)。
-      - finale=1 → 等 armed=1（mod 設好殘局 HP/位置/過完開場）才回 (True, true_max)。
-      - 逾時/讀不到（mod 舊版未寫、未載入）→ 當正常場 (False, -1)，安全降級。
+      - finale=0 → 正常場，立即回 (False, -1, -1)。
+      - finale=1 → 等 armed=1（mod 設好殘局 HP/位置/過完開場）才回 (True, true_max, boss_frac)。
+      - 逾時/讀不到（mod 舊版未寫、未載入）→ 當正常場 (False, -1, -1)，安全降級。
+
+    boss_frac 給 env 按比例縮殘局贏分（舊版 mod 未送此欄 → -1，env 端 fallback 不縮）。
     """
     import time
     if timeout is None:
@@ -81,15 +87,15 @@ def wait_for_armed(should_stop=None, timeout=None):
     t0 = time.perf_counter()
     while time.perf_counter() - t0 < timeout:
         if should_stop and should_stop():
-            return False, -1
+            return False, -1, -1.0
         st = _read_finale()
         if st is not None:
             if not st["finale"]:
-                return False, -1
+                return False, -1, -1.0
             if st["armed"]:
-                return True, st["true_max"]
+                return True, st["true_max"], st["boss_frac"]
         time.sleep(0.05)
-    return False, -1   # 逾時：安全當正常場跑
+    return False, -1, -1.0   # 逾時：安全當正常場跑
 
 
 def read_scale():

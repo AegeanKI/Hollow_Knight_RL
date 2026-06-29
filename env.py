@@ -87,8 +87,9 @@ class HollowKnightEnv:
         self._prev_player = None
         self._scale = 1.0       # 作法A：本場 reward 正規化 scale（reset 時依 curriculum 設定）
         self._finale = False    # 殘局模式：本場是否為殘血開局（mod 決定，reset 握手取得）
-        self._true_max = -1     # 殘局：mod 降血前 capture 的真實滿血（握手帶來；目前僅診斷用，
+        self._true_max = -1     # 殘局：mod 降血前 capture 的真實滿血（握手帶來；僅診斷用，
                                 #        指標基準改用 boss0=殘血起始，見 step 的 boss_max=-1）
+        self._finale_boss_frac = -1.0   # 殘局：boss 起始血占真實滿血比例（mod 握手帶來），用來按比例縮殘局贏分
         # privileged critic：特權特徵的「上一步」基準（掉包/未見到時 backfill 用），每場 reset
         self._prev_boss_frac = 1.0
         self._prev_player_frac = 1.0
@@ -162,6 +163,9 @@ class HollowKnightEnv:
         self.act.release_all()
         curriculum.end_drop()     # 清掉上一場可能留下的遮擋旗標，確保新一場正常計入勝負
         curriculum.clear_finale() # 清上一場殘局握手檔（避免讀到舊狀態）
+        if config.TELEMETRY_DUMP:  # 從這裡（選難度/開場）開始錄遙測，episode 末寫檔供檢查
+            self.rx.start_recording()
+            self.rx.mark("RESET (難度選擇/開場 開始)")
         for attempt in range(max_retries):
             if should_stop and should_stop():
                 return None, {}
@@ -172,9 +176,13 @@ class HollowKnightEnv:
                 self.act.release_all()
                 # 殘局握手：總閘關閉時完全跳過 → 正常路徑逐位元不變。開啟時等 mod 設好殘局
                 # （或判定為正常場）才抓首 obs，讓首 obs = 殘局起始狀態、且跳過開場優勢視窗。
-                self._finale, self._true_max = False, -1
+                self._finale, self._true_max, self._finale_boss_frac = False, -1, -1.0
                 if config.FINALE_ENABLED:
-                    self._finale, self._true_max = curriculum.wait_for_armed(should_stop)
+                    self._finale, self._true_max, self._finale_boss_frac = \
+                        curriculum.wait_for_armed(should_stop)
+                if config.TELEMETRY_DUMP:  # 標出 agent 開始打的時點（殘局：降血/移位/開場 gate 都在這之前）
+                    self.rx.mark(f"ARMED finale={self._finale} true_max={self._true_max} "
+                                 f"boss_frac={self._finale_boss_frac:.2f}")
                 self.monitor = EpisodeMonitor()
                 self.stacker.reset()
                 self.stacker.push(self.cap.grab_raw())
@@ -285,6 +293,9 @@ class HollowKnightEnv:
             elapsed = time.perf_counter() - self._ep_wall0 if self._ep_wall0 else 0.0
             info["fps"] = self._steps / elapsed if elapsed > 0 else 0.0
             info["over_runs"] = sorted(self._over_runs, key=lambda t: t[1], reverse=True)
+            if config.TELEMETRY_DUMP:  # 本場結束 → 覆蓋寫遙測 dump 供檢查
+                self.rx.mark(f"EP_END result={info.get('result')} finale={self._finale}")
+                self.rx.dump_recording(config.TELEMETRY_DUMP_FILE)
         return obs, reward, terminated, truncated, info
 
     def _reward_and_done(self, tele):
@@ -329,7 +340,14 @@ class HollowKnightEnv:
         terminated = result in ("win", "lose", "left")
         # 作法A：贏弱化版不值錢(×scale)、輸弱化版更痛(/scale，設上限防龜縮)
         if result == "win":
-            r += config.RW_WIN * self._scale
+            win_bonus = config.RW_WIN * self._scale
+            if self._finale and self._finale_boss_frac > 0:
+                # 殘局：按 boss 起始血占滿血的比例縮收尾紅利（少血殘局＝要收的少→紅利等比少），
+                # 消「局簡單卻領滿額 RW_WIN」失真。逐刀傷害分本就隨血量等比，故只縮這個固定贏分；
+                # lose 刻意不動——縮 win 已讓 lose 相對更重，再加大 lose 會教出怕死龜縮、害收尾。
+                # boss_frac<=0＝舊版 mod 未送此欄 → fallback 不縮（安全降級）。
+                win_bonus *= self._finale_boss_frac
+            r += win_bonus
         elif result == "lose":
             r -= min(config.RW_LOSE / self._scale, config.RW_LOSE_CAP)
         info["result"] = result

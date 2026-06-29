@@ -70,12 +70,15 @@ namespace HKCurriculum
 
         // ---- 殘局模式 (finale practice) 參數（同檔讀）----
         private int FinaleEvery = 0;             // >0：確定性「每 N 場(非eval)第 N 場殘局」；0=停用。第一場永遠正常(wasReady)
-        private float FinaleBossHpMin = 0.20f;   // 殘局 boss 起始當前血佔真實滿血比例 [min,max]
-        private float FinaleBossHpMax = 0.50f;
-        private float FinalePlayerHpMin = 0.20f; // 殘局玩家起始血比例 [min,max]，會 clamp 成 <= bossFrac
-        private float FinalePlayerHpMax = 0.50f;
-        private float FinaleOpeningDelay = 2.0f; // 殘局：等開場(FSM 離開 intro)的 fallback 上限秒數
+        private int FinalePlayerMinMasks = 5;    // 殘局玩家起始血(整數面具)隨機範圍 [min,max]
+        private int FinalePlayerMaxMasks = 6;    // 取整數面具(非先取百分比再 floor)避免玩家實際比例偏低
+        private float FinaleBossMinFrac = 0.33f; // 殘局 boss 起始血＝真實滿血的百分比 [min,max]（與玩家面具解耦，
+        private float FinaleBossMaxFrac = 0.44f; // 釘在 EVAL 死亡區 ~0.33-0.44＝練收尾；贏分 Python 端按此 frac 縮
+        private bool FinaleDebug = false;        // 診斷開關：寫 arena_probe/hud_probe/FSM log/[heropos] spam（換王重 probe 才開）
+        private float FinaleOpeningDelay = 5.0f; // 殘局：等 boss 進戰鬥態(過開場)的 fallback 上限秒數
         private float FinaleSettleDelay = 0.3f;  // 殘局：設殘血/移位後再等這秒數讓物理/遙測/面具穩定才 arm
+        private float FinaleArenaXMin = -999f;   // 殘局放置 x 範圍覆寫（> -900 才生效；否則用 CameraLockArea/fallback）
+        private float FinaleArenaXMax = -999f;   // GG_Hornet_1 實測可走 [15.3,37.7]
         private readonly System.Random _rng = new System.Random();
 
         // 場地座標（第一場正常戰鬥 capture；殘局放位置用）。未就緒前一律強制正常場。
@@ -160,10 +163,10 @@ namespace HKCurriculum
             _resolved = false;
             int trueMax = hm.hp;                                     // 降血前的真實滿血（FSM 已設好）
 
-            // 第一場：強制正常，capture 場地座標 + dump 候選值（給日後挑正確欄位）。
+            // 第一場：強制正常，capture 場地座標（+ debug 時 dump 候選值）。
             // 用 wasReady 快照：CaptureArena 會把 _arenaReady 設 true，但「本場」仍須算第一場（強制正常）。
             bool wasReady = _arenaReady;
-            if (!_arenaReady) { CaptureArena(hm); DumpArenaProbe(hm); }
+            if (!_arenaReady) { CaptureArena(hm); if (FinaleDebug) DumpArenaProbe(hm); }
 
             // 場次計數（eval 不算進殘局週期）。第一場 counter=1（wasReady=false → 仍強制正常）。
             if (!_evalThisFight) _fightCounter++;
@@ -185,30 +188,35 @@ namespace HKCurriculum
             // ---- 殘局場 ----
             WriteFinaleFile(true, false, trueMax);                  // 先告知 Python：殘局、尚未 armed
             _finaleCount++;
-            // 等 boss 離開開場 state（FSM ActiveStateName 含 "intro"；GG_Hornet 是 "GG Intro 1 Stun"）
-            // 才算開場跑完、進戰鬥態 → 提早放行（排除開場 free-hit 優勢）。需先「看過」intro 才認它離開，
-            // 避免 FSM 還沒進 intro 就誤判結束。偵測不到（state 名不符）→ 退回 finale_opening_delay 當上限。
+
+            // 先降血 + 移位（boss 的落地/開場動畫在這之後才等）。
+            // 殘血：玩家取整數面具 [min,max]；boss 用「獨立百分比」[BossMinFrac,BossMaxFrac]（與玩家解耦＝
+            // 把 boss 釘在 EVAL 死亡區 ~0.33-0.44 練收尾，玩家給足面具撐到能練完）。boss_frac ≤ player_frac
+            // 由參數範圍保證(5-6 面具 frac≥0.56 > boss 0.44)。boss_frac 經 armed 握手帶給 Python 按比例縮贏分。
+            int pmax = PlayerMaxHp();
+            int playerMasks = Mathf.Clamp(_rng.Next(FinalePlayerMinMasks, FinalePlayerMaxMasks + 1), 1, pmax);
+            float bossFrac = RandRange(FinaleBossMinFrac, FinaleBossMaxFrac);
+            SetPlayerHp(playerMasks);
+            hm.hp = Mathf.Max(1, Mathf.RoundToInt(trueMax * bossFrac));
+            PlaceCombatants(hm);
+
+            // 移位後等 boss 真正進戰鬥態（離開含 intro/GG Land/Flourish 的開場 state，那段不攻擊＝free-hit）。
+            // 需先「看過」開場 state 才認它離開，避免誤判提早。偵測不到 / 開場是 input-gated（agent idle 時
+            // boss 不推進）→ 退回 finale_opening_delay 上限照常 arm（post-arm FSM log 會顯示是哪種）。
             _lastFsmLog = -1f;
-            bool sawIntro = false;
+            bool sawOpening = false;
             for (float t = 0f; t < FinaleOpeningDelay; t += Time.unscaledDeltaTime)
             {
                 if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }   // boss 消失，棄→當正常
-                if (_finaleCount <= FsmProbeFights) LogBossFsmState(hm, t);
-                bool inIntro = BossInIntro(hm);
-                if (inIntro) sawIntro = true;
-                else if (sawIntro) break;                                            // 看過 intro 且已離開＝開場結束
+                if (FinaleDebug && _finaleCount <= FsmProbeFights) LogBossFsmState(hm, t);
+                bool inOpening = BossInOpening(hm);
+                if (inOpening) sawOpening = true;
+                else if (sawOpening) break;                                          // 看過開場且已進戰鬥
                 yield return null;
             }
             if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }
 
-            // 殘血：boss frac∈[min,max]；player frac∈[min, min(max,bossFrac)]（保證 player ≤ boss）
-            float bossFrac = RandRange(FinaleBossHpMin, FinaleBossHpMax);
-            float playerFrac = RandRange(FinalePlayerHpMin, Mathf.Min(FinalePlayerHpMax, bossFrac));
-            hm.hp = Mathf.Max(1, Mathf.RoundToInt(trueMax * bossFrac));
-            SetPlayerHp(playerFrac);
-            PlaceCombatants(hm);
-            // 等幾幀讓角色落地、物理/遙測/面具穩定，再 arm → Python 抓的首 obs 是穩定落地狀態
-            // （非半空下墜）、遙測也已反映降血/移位（PlaceCombatants 放在 floorY+1 靠重力沉下）。
+            // settle：等角色落地、物理/遙測/面具穩定再 arm（PlaceCombatants 放 floorY+1 靠重力沉下）。
             for (float s = 0f; s < FinaleSettleDelay; s += Time.unscaledDeltaTime)
             {
                 if (hm == null) { WriteFinaleFile(false, true, -1); yield break; }
@@ -219,25 +227,41 @@ namespace HKCurriculum
             _fightActive = true;
             float m = DamageMultiplier();
             _mod.Info($"[curriculum] FINALE start: bossHp={hm.hp}/{trueMax}({bossFrac:0.00}) "
-                      + $"playerFrac={playerFrac:0.00} scale={Scale:0.00} dmg×{m:0.00}");
-            WriteFinaleFile(true, true, trueMax);                  // armed：Python 可以開始
+                      + $"playerHp={playerMasks}/{pmax} scale={Scale:0.00} dmg×{m:0.00}");
+            WriteFinaleFile(true, true, trueMax, bossFrac);       // armed：Python 可以開始（帶 boss_frac 縮贏分）
+            // 【診斷】開始記錄 arm 後 boss FSM（Update 裡跑 FinaleFsmPolls 次）；marker 分隔開場 gate 段
+            if (FinaleDebug && _finaleCount <= FsmProbeFights)
+            {
+                _finaleActivePolls = 0;
+                _lastFsmLog = -1f;
+                try { File.AppendAllText(_probeFile, "[fsm] === ARMED (agent 開始) ===\n"); } catch { }
+            }
         }
 
         private float _lastFsmLog = -1f;
         private int _finaleCount;                 // 跑過幾場殘局（用來只在前幾場 dump FSM state）
         private const int FsmProbeFights = 5;     // 只在前 N 場殘局記 boss FSM state 到 probe
+        private int _finaleActivePolls;           // 【診斷】殘局 arm 後已記錄幾次 FSM
+        private const int FinaleFsmPolls = 60;    // 【診斷】arm 後記錄 boss FSM 的 poll 數（~4s@15Hz）
+        private float _heroXMin = 9999f, _heroXMax = -9999f; // 自動學習的放置 x 範圍（onFloor 觀測擴張）
+        private const float FloorYTol = 1.0f;     // 視為「在初始 floor 高度」的 y 容差（濾掉跳躍/別樓層）
 
         private float RandRange(float a, float b) =>
             (b <= a) ? a : a + (float)_rng.NextDouble() * (b - a);
 
-        // 殘局：設玩家當前血為滿血×frac（vision-only 下遙測讀 pd.health 即準；HUD 同步待 probe 驗證）
-        private void SetPlayerHp(float frac)
+        private int PlayerMaxHp()
+        {
+            var pd = PlayerData.instance;
+            return pd != null ? pd.maxHealth : 9;
+        }
+
+        // 殘局：直接設玩家當前血為整數面具數（vision-only 遙測讀 pd.health 即準）
+        private void SetPlayerHp(int masks)
         {
             var pd = PlayerData.instance;
             if (pd == null) return;
-            int max = pd.maxHealth;
-            pd.health = Mathf.Clamp(Mathf.RoundToInt(max * frac), 1, max);
-            if (!_hudProbed) { _hudProbed = true; DumpHudFsms(); }   // 保留：首場 dump 供日後參考
+            pd.health = Mathf.Clamp(masks, 1, pd.maxHealth);
+            if (FinaleDebug && !_hudProbed) { _hudProbed = true; DumpHudFsms(); }   // debug 才 dump
             RefreshHealthHud();   // 直接寫 pd.health 不會重畫面具 → 送 HERO DAMAGED 讓面具重算
         }
 
@@ -307,14 +331,14 @@ namespace HKCurriculum
             var hero = HeroController.instance;
             if (hero == null || hm == null) return;
             float margin = 2f, minSep = 4f;
-            float lo = _arenaXMin + margin, hi = _arenaXMax - margin;
-            if (hi <= lo) { lo = _arenaXMin; hi = _arenaXMax; }
+            float lo = _heroXMin + margin, hi = _heroXMax - margin;   // 用自動學習的 live 玩家可走範圍
+            if (hi <= lo) { lo = _heroXMin; hi = _heroXMax; }
             float px = RandRange(lo, hi), bx = RandRange(lo, hi);
             for (int g = 0; Mathf.Abs(bx - px) < minSep && g < 10; g++) bx = RandRange(lo, hi);
             var hp = hero.transform.position;
-            hero.transform.position = new Vector3(px, _floorY + 1f, hp.z);
+            hero.transform.position = new Vector3(px, _floorY + 1f, hp.z);    // 玩家放地板上方一點靠重力沉
             var bp = hm.transform.position;
-            hm.transform.position = new Vector3(bx, _floorY + 1f, bp.z);
+            hm.transform.position = new Vector3(bx, bp.y, bp.z);              // boss 只改 x、保留原高 y → 自然從空中落下
         }
 
         // 第一場 capture 場地座標：floor y 用開場玩家落地 y；x 範圍 v1 用玩家 x±8 後備
@@ -324,10 +348,14 @@ namespace HKCurriculum
             var hero = HeroController.instance;
             float cx = 0f;
             if (hero != null) { _floorY = hero.transform.position.y; cx = hero.transform.position.x; }
-            _arenaXMin = cx - 8f; _arenaXMax = cx + 8f;   // 後備：玩家 x±8
-            TryCameraLockBounds();                          // 有 CameraLockArea 就覆寫成真 arena x-bounds
+            _arenaXMin = cx - 8f; _arenaXMax = cx + 8f;   // 初始 seed：玩家 x±8
+            TryCameraLockBounds();                          // 有 CameraLockArea 就覆寫 seed
+            if (FinaleArenaXMin > -900f && FinaleArenaXMax > FinaleArenaXMin)
+            { _arenaXMin = FinaleArenaXMin; _arenaXMax = FinaleArenaXMax; }   // config 手動覆寫(預設不開)
+            // 自動學習：放置範圍從 seed 起，之後每場用觀測到的玩家 x running min/max 持續擴張(見 Update)。
+            _heroXMin = _arenaXMin; _heroXMax = _arenaXMax;
             _arenaReady = true;
-            _mod?.Info($"[curriculum] arena: floorY={_floorY:0.0} xRange=[{_arenaXMin:0.0},{_arenaXMax:0.0}]");
+            _mod?.Info($"[curriculum] arena seed=[{_arenaXMin:0.0},{_arenaXMax:0.0}] floorY={_floorY:0.0}（之後自動擴張）");
         }
 
         // 用場上最寬的 CameraLockArea 的 cameraXMin/cameraXMax 當 arena x 範圍（反射，不硬引用型別）。
@@ -385,9 +413,11 @@ namespace HKCurriculum
 
         // 殘局開場期間：反射記錄 boss 各 PlayMakerFSM 的 ActiveStateName（不引用 PlayMaker，純反射），
         // 約每 0.25s 一筆 append 到 probe；給日後把「固定延遲」升級成「偵測 FSM 離開開場 state」。
-        // boss 是否還在開場 state：任一 boss PlayMakerFSM 的 ActiveStateName 含 "intro"（不分大小寫）。
-        // 反射讀（不引用 PlayMaker），只看 boss 自己的 FSM components（非全域）。
-        private bool BossInIntro(HealthManager hm)
+        // boss 是否還在開場 state（不攻擊）。實測 GG_Hornet 開場序列：
+        //   GG Intro 1(站立) → GG Fall(落下) → GG Land(落地) → Flourish(花式) → Run/GDash/...(真攻擊)
+        // 開場 state 都有 "gg " 前綴或是 "flourish"；戰鬥 state(Run/Jump/GDash/G Dash/Throw/Sphere/Evade)
+        // 都沒有 "gg "（"gdash"/"g dash" 不含 "gg "）→ 用 "gg "||"flourish" 涵蓋完整開場、不誤中戰鬥。
+        private bool BossInOpening(HealthManager hm)
         {
             if (hm == null) return false;
             try
@@ -398,8 +428,9 @@ namespace HKCurriculum
                 foreach (var c in hm.GetComponents<MonoBehaviour>())
                 {
                     if (c == null || c.GetType().Name != "PlayMakerFSM") continue;
-                    var sn = stateProp.GetValue(c, null) as string;
-                    if (sn != null && sn.ToLower().Contains("intro")) return true;
+                    var sn = (stateProp.GetValue(c, null) as string)?.ToLower();
+                    if (sn == null) continue;
+                    if (sn.Contains("gg ") || sn.Contains("flourish")) return true;
                 }
             }
             catch { }
@@ -427,12 +458,13 @@ namespace HKCurriculum
             catch { }
         }
 
-        private void WriteFinaleFile(bool finale, bool armed, int trueMax)
+        private void WriteFinaleFile(bool finale, bool armed, int trueMax, float bossFrac = -1f)
         {
             try
             {
                 File.WriteAllText(_finaleFile,
-                    $"finale={(finale ? 1 : 0)}\narmed={(armed ? 1 : 0)}\ntrue_max={trueMax}\n");
+                    $"finale={(finale ? 1 : 0)}\narmed={(armed ? 1 : 0)}\ntrue_max={trueMax}\n"
+                    + $"boss_frac={bossFrac.ToString(CultureInfo.InvariantCulture)}\n");
             }
             catch { }
         }
@@ -469,7 +501,31 @@ namespace HKCurriculum
                 _handled.Clear();
                 return;
             }
+
+            // 自動學習放置 x 範圍：只在「站在初始 floor 高度（onGround 且 y≈floorY）」時才用該 x 擴張。
+            // 否則把跳躍中/不同樓層高度的 x 算進去，之後在那個 x 放 (x, floorY+1) 可能卡地形/懸空。
+            var heroD = HeroController.instance;
+            if (heroD != null)
+            {
+                var hp = heroD.transform.position;
+                // 只在「站在初始 floor 高度」時用該 x 擴張放置範圍（濾掉跳躍/別樓層；見前述）。
+                if (heroD.cState.onGround && Mathf.Abs(hp.y - _floorY) < FloorYTol)
+                {
+                    bool expanded = false;
+                    if (hp.x < _heroXMin) { _heroXMin = hp.x; expanded = true; }
+                    if (hp.x > _heroXMax) { _heroXMax = hp.x; expanded = true; }
+                    if (expanded) _mod.Info($"[curriculum] 放置範圍擴張→[{_heroXMin:0.0},{_heroXMax:0.0}]");
+                }
+            }
+
             if (!_fightActive || _resolved) return;
+
+            // 【診斷】殘局 arm 後記錄 boss FSM state（看 armed 後 boss 經過哪些 state、何時真正可攻擊）。
+            if (FinaleDebug && _finaleThisFight && _finaleCount <= FsmProbeFights && _finaleActivePolls < FinaleFsmPolls)
+            {
+                LogBossFsmState(_boss, _finaleActivePolls * PollInterval);
+                _finaleActivePolls++;
+            }
 
             // 遮擋旗標：Python 偵測到畫面被遮擋後寫此檔，閂住 -> 本場（即將「等輸」的敗）不計入勝率。
             // 用閂的（看到一次就記住），Python 之後清檔的時機就不必精準。
@@ -562,12 +618,15 @@ namespace HKCurriculum
             WaitFrames = GetI(kv, "wait_frames", WaitFrames);
             PollInterval = GetF(kv, "poll_interval", PollInterval);
             FinaleEvery = GetI(kv, "finale_every", FinaleEvery);
-            FinaleBossHpMin = GetF(kv, "finale_boss_hp_min", FinaleBossHpMin);
-            FinaleBossHpMax = GetF(kv, "finale_boss_hp_max", FinaleBossHpMax);
-            FinalePlayerHpMin = GetF(kv, "finale_player_hp_min", FinalePlayerHpMin);
-            FinalePlayerHpMax = GetF(kv, "finale_player_hp_max", FinalePlayerHpMax);
+            FinalePlayerMinMasks = GetI(kv, "finale_player_min_masks", FinalePlayerMinMasks);
+            FinalePlayerMaxMasks = GetI(kv, "finale_player_max_masks", FinalePlayerMaxMasks);
+            FinaleBossMinFrac = GetF(kv, "finale_boss_min_frac", FinaleBossMinFrac);
+            FinaleBossMaxFrac = GetF(kv, "finale_boss_max_frac", FinaleBossMaxFrac);
             FinaleOpeningDelay = GetF(kv, "finale_opening_delay", FinaleOpeningDelay);
             FinaleSettleDelay = GetF(kv, "finale_settle_delay", FinaleSettleDelay);
+            FinaleArenaXMin = GetF(kv, "finale_arena_xmin", FinaleArenaXMin);
+            FinaleArenaXMax = GetF(kv, "finale_arena_xmax", FinaleArenaXMax);
+            FinaleDebug = GetI(kv, "finale_debug", 0) != 0;
             if (!File.Exists(_configFile)) WriteDefaultConfig();
             _mod?.Info($"[curriculum] config: scaleMin={ScaleMin:0.00} step={ScaleStep:0.00} "
                        + $"window={Window} raise={RaiseAbove:0.00} finaleEvery={FinaleEvery}");
@@ -610,18 +669,27 @@ namespace HKCurriculum
                 sb.AppendLine("# finale_every>0：確定性「每 N 場(非eval)的第 N 場殘局」(固定順序)。0=停用。");
                 sb.AppendLine("# 例 5＝前4場正常、第5場殘局。第一場永遠正常(不受此值影響)。");
                 sb.AppendLine($"finale_every={FinaleEvery}");
-                sb.AppendLine("# 殘局 boss 起始當前血佔真實滿血的比例 [min,max]。建議 0.20-0.50（中後段殊死局）。");
-                sb.AppendLine($"finale_boss_hp_min={I(FinaleBossHpMin)}");
-                sb.AppendLine($"finale_boss_hp_max={I(FinaleBossHpMax)}");
-                sb.AppendLine("# 殘局玩家起始血比例 [min,max]。實際會 clamp 成 <= 該場 bossFrac（保證玩家≤boss、練殊死）。");
-                sb.AppendLine($"finale_player_hp_min={I(FinalePlayerHpMin)}");
-                sb.AppendLine($"finale_player_hp_max={I(FinalePlayerHpMax)}");
+                sb.AppendLine("# 殘局玩家起始血＝整數面具隨機 [min,max]。建議 5-6（給足存活空間練收尾）。");
+                sb.AppendLine("# 取整數面具(非先取百分比再 floor)避免玩家實際比例偏低。");
+                sb.AppendLine($"finale_player_min_masks={FinalePlayerMinMasks}");
+                sb.AppendLine($"finale_player_max_masks={FinalePlayerMaxMasks}");
+                sb.AppendLine("# 殘局 boss 起始血＝真實滿血的百分比 [min,max]（與玩家面具解耦）。釘在 EVAL 死亡區");
+                sb.AppendLine("# ~0.33-0.44（=agent 平均打掉 ~74% 後死的剩餘血）＝集中練收尾。Python 端贏分按此 frac 縮，");
+                sb.AppendLine("# 消「局簡單卻領滿額收尾紅利」失真。boss_frac ≤ player_frac 由範圍保證(5-6面具≥0.56>0.44)。");
+                sb.AppendLine($"finale_boss_min_frac={I(FinaleBossMinFrac)}");
+                sb.AppendLine($"finale_boss_max_frac={I(FinaleBossMaxFrac)}");
                 sb.AppendLine("# 開場等待上限(秒)：實際是等 boss FSM 離開開場 state(含 intro)才放行、提早結束；");
                 sb.AppendLine("# 此值僅當 FSM 偵測不到時的 fallback 上限。建議 2.0。");
                 sb.AppendLine("# ★必須 < Python config.FINALE_ARM_TIMEOUT(6.0)，否則 Python 等不到 armed 會當正常場。");
                 sb.AppendLine($"finale_opening_delay={I(FinaleOpeningDelay)}");
                 sb.AppendLine("# 設殘血/移位後再等幾秒讓物理(角色落地)/遙測/面具穩定才 arm。建議 0.3。");
                 sb.AppendLine($"finale_settle_delay={I(FinaleSettleDelay)}");
+                sb.AppendLine("# 殘局放置 x 範圍覆寫（> -900 才生效；否則用 CameraLockArea/玩家x±8 後備）。");
+                sb.AppendLine("# GG_Hornet_1 實測可走 [15.3,37.7]（CameraLockArea 在此場給 span=0 不可用）。");
+                sb.AppendLine($"finale_arena_xmin={I(FinaleArenaXMin)}");
+                sb.AppendLine($"finale_arena_xmax={I(FinaleArenaXMax)}");
+                sb.AppendLine("# 診斷開關：1=寫 arena_probe/hud_probe/FSM log/[heropos] spam（換王重 probe 才開）。預設 0。");
+                sb.AppendLine($"finale_debug={(FinaleDebug ? 1 : 0)}");
                 File.WriteAllText(_configFile, sb.ToString());
                 _mod?.Info($"[curriculum] wrote default config -> {_configFile}");
             }

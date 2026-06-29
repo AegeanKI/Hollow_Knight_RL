@@ -123,9 +123,13 @@ FINALE_ENABLED = True
 CURRICULUM_FINALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_finale.txt")
 # 殘局 reset 等 armed（mod 設好殘局）的逾時秒數：等不到（mod 舊版未寫/未載入）就當正常場
 # 跑，安全降級（FINALE_ENABLED 關時根本不會走到這）。
-# ★必須 > mod 的 finale_opening_delay（預設 2.0），否則 mod 還在等開場、Python 已逾時當正常場，
-#   兩端對本場是否殘局的認知會不一致。預設 6.0 給足餘裕。
-FINALE_ARM_TIMEOUT = 6.0
+# ★必須 > mod 的 finale_opening_delay（預設 5.0）+ finale_settle_delay（0.3），否則 mod 還在等開場、
+#   Python 已逾時當正常場，兩端對本場是否殘局的認知會不一致。預設 8.0 給足餘裕。
+FINALE_ARM_TIMEOUT = 8.0
+# 每場把收到的遙測錄起來、episode 末覆蓋寫到下面的檔（從 reset/選難度起，含 RESET/ARMED/EP_END
+# marker）供檢查血量調整、armed 時機、boss_max 是否抓對。不需要時設 False。檔每場覆蓋、不會變大。
+TELEMETRY_DUMP = True
+TELEMETRY_DUMP_FILE = os.path.join("logs", "telemetry_dump.txt")
 
 # ---- 畫面遮擋偵測 (keys.is_region_occluded) ----------------------------------
 # 擷取區被其他視窗（z-order 在 HK 之上）覆蓋的比例 >= 此值 -> 視為遮擋（T1 幾何重疊）。

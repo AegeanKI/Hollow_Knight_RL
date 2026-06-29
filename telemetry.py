@@ -24,6 +24,10 @@ class TelemetryReceiver:
         self._latest_t = 0.0      # 收到的時間 (perf_counter)
         self._running = False
         self._thread = None
+        # 每場錄製：收到的每筆遙測 + env 插的 marker，episode 末寫檔（覆蓋）供檢查。
+        self._rec = None          # None=未錄製；list[(相對t, dict)]=錄製中
+        self._rec_t0 = 0.0
+        self._rec_lock = threading.Lock()
 
     def start(self):
         self._running = True
@@ -39,16 +43,47 @@ class TelemetryReceiver:
             except OSError:
                 break
             try:
-                self._latest = json.loads(data.decode("utf-8"))
-                self._latest_t = time.perf_counter()
+                d = json.loads(data.decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
-                pass
+                continue
+            t = time.perf_counter()
+            self._latest = d
+            self._latest_t = t
+            with self._rec_lock:
+                if self._rec is not None:
+                    self._rec.append((t - self._rec_t0, d))
 
     def sample(self):
         """回傳 (最新dict 或 None, 距今幾秒)。"""
         if self._latest is None:
             return None, float("inf")
         return self._latest, time.perf_counter() - self._latest_t
+
+    def start_recording(self):
+        """開始新一場錄製（清掉上一場），時間軸從現在歸零。"""
+        with self._rec_lock:
+            self._rec = []
+            self._rec_t0 = time.perf_counter()
+
+    def mark(self, label):
+        """在錄製中插一條 marker（如 RESET/ARMED/EP_END），標出 env 端事件時點。"""
+        with self._rec_lock:
+            if self._rec is not None:
+                self._rec.append((time.perf_counter() - self._rec_t0, {"_mark": label}))
+
+    def dump_recording(self, path):
+        """把本場錄製覆蓋寫到 path（每筆遙測一行 + marker 行）。"""
+        with self._rec_lock:
+            rec = list(self._rec) if self._rec is not None else []
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for t, d in rec:
+                    if "_mark" in d:
+                        f.write(f"t={t:7.3f}  ===== {d['_mark']} =====\n")
+                    else:
+                        f.write(f"t={t:7.3f}  {json.dumps(d, ensure_ascii=False)}\n")
+        except OSError:
+            pass
 
     def stop(self):
         self._running = False
