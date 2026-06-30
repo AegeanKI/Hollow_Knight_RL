@@ -79,7 +79,8 @@ def wait_for_armed(should_stop=None, timeout=None):
       - finale=1 → 等 armed=1（mod 設好殘局 HP/位置/過完開場）才回 (True, true_max, boss_frac)。
       - 逾時/讀不到（mod 舊版未寫、未載入）→ 當正常場 (False, -1, -1)，安全降級。
 
-    boss_frac 給 env 按比例縮殘局贏分（舊版 mod 未送此欄 → -1，env 端 fallback 不縮）。
+    boss_frac＝殘局 boss 起始血占真實滿血比例；目前僅供 env 的 ARMED 遙測 log（曾用來縮殘局贏分，
+    已於 4c0de8b 還原成全額，不再進 reward）。舊版 mod 未送此欄 → -1。
     """
     import time
     if timeout is None:

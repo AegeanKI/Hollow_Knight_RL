@@ -70,10 +70,10 @@ namespace HKCurriculum
 
         // ---- 殘局模式 (finale practice) 參數（同檔讀）----
         private int FinaleEvery = 0;             // >0：確定性「每 N 場(非eval)第 N 場殘局」；0=停用。第一場永遠正常(wasReady)
-        private int FinalePlayerMinMasks = 5;    // 殘局玩家起始血(整數面具)隨機範圍 [min,max]
-        private int FinalePlayerMaxMasks = 6;    // 取整數面具(非先取百分比再 floor)避免玩家實際比例偏低
-        private float FinaleBossMinFrac = 0.33f; // 殘局 boss 起始血＝真實滿血的百分比 [min,max]（與玩家面具解耦，
-        private float FinaleBossMaxFrac = 0.44f; // 釘在 EVAL 死亡區 ~0.33-0.44＝練收尾；贏分 Python 端按此 frac 縮
+        private int FinalePlayerMinMasks = 2;    // 殘局玩家起始血(整數面具)隨機範圍 [min,max]；釘真實死亡區
+        private int FinalePlayerMaxMasks = 3;    // (1-2 面具)＝練 HUD-conditioned actor 真正會輸的低血收尾分支
+        private float FinaleBossMinFrac = 0.20f; // 殘局 boss 起始血＝真實滿血百分比 [min,max]（與玩家面具解耦）。
+        private float FinaleBossMaxFrac = 0.30f; // 低血 AND 低 boss＝殊死收尾；boss 夠低才贏得到。boss_frac 僅供 Python ARMED log、不進 reward
         private bool FinaleDebug = false;        // 診斷開關：寫 arena_probe/hud_probe/FSM log/[heropos] spam（換王重 probe 才開）
         private float FinaleOpeningDelay = 5.0f; // 殘局：等 boss 進戰鬥態(過開場)的 fallback 上限秒數
         private float FinaleSettleDelay = 0.3f;  // 殘局：設殘血/移位後再等這秒數讓物理/遙測/面具穩定才 arm
@@ -190,9 +190,11 @@ namespace HKCurriculum
             _finaleCount++;
 
             // 先降血 + 移位（boss 的落地/開場動畫在這之後才等）。
-            // 殘血：玩家取整數面具 [min,max]；boss 用「獨立百分比」[BossMinFrac,BossMaxFrac]（與玩家解耦＝
-            // 把 boss 釘在 EVAL 死亡區 ~0.33-0.44 練收尾，玩家給足面具撐到能練完）。boss_frac ≤ player_frac
-            // 由參數範圍保證(5-6 面具 frac≥0.56 > boss 0.44)。boss_frac 經 armed 握手帶給 Python 按比例縮贏分。
+            // 殘血：玩家取整數面具 [min,max]；boss 用「獨立百分比」[BossMinFrac,BossMaxFrac]（各自抽、解耦）。
+            // 設計＝把玩家 AND boss 都釘在「真實 EVAL 死亡區」(玩家 1-2 面具、boss 打掉 ~77% 後的殘血)＝練
+            // HUD-conditioned actor 真正會輸的低血殊死收尾分支(舊 5-6 面具版練的是健康收殘血、HUD 情境不對、
+            // 不轉移)。boss 夠低(0.20-0.30)才贏得到。boss_frac/player_frac 可重疊(不再保證 boss≤player)。
+            // boss_frac 經 armed 握手帶給 Python，僅供 ARMED 遙測 log、不進 reward(×boss_frac 已還原)。
             int pmax = PlayerMaxHp();
             int playerMasks = Mathf.Clamp(_rng.Next(FinalePlayerMinMasks, FinalePlayerMaxMasks + 1), 1, pmax);
             float bossFrac = RandRange(FinaleBossMinFrac, FinaleBossMaxFrac);
@@ -228,7 +230,7 @@ namespace HKCurriculum
             float m = DamageMultiplier();
             _mod.Info($"[curriculum] FINALE start: bossHp={hm.hp}/{trueMax}({bossFrac:0.00}) "
                       + $"playerHp={playerMasks}/{pmax} scale={Scale:0.00} dmg×{m:0.00}");
-            WriteFinaleFile(true, true, trueMax, bossFrac);       // armed：Python 可以開始（帶 boss_frac 縮贏分）
+            WriteFinaleFile(true, true, trueMax, bossFrac);       // armed：Python 可以開始（帶 boss_frac 供 ARMED log）
             // 【診斷】開始記錄 arm 後 boss FSM（Update 裡跑 FinaleFsmPolls 次）；marker 分隔開場 gate 段
             if (FinaleDebug && _finaleCount <= FsmProbeFights)
             {
@@ -669,13 +671,14 @@ namespace HKCurriculum
                 sb.AppendLine("# finale_every>0：確定性「每 N 場(非eval)的第 N 場殘局」(固定順序)。0=停用。");
                 sb.AppendLine("# 例 5＝前4場正常、第5場殘局。第一場永遠正常(不受此值影響)。");
                 sb.AppendLine($"finale_every={FinaleEvery}");
-                sb.AppendLine("# 殘局玩家起始血＝整數面具隨機 [min,max]。建議 5-6（給足存活空間練收尾）。");
+                sb.AppendLine("# 殘局玩家起始血＝整數面具隨機 [min,max]。建議 2-3（釘真實死亡區=1-2面具）。");
                 sb.AppendLine("# 取整數面具(非先取百分比再 floor)避免玩家實際比例偏低。");
                 sb.AppendLine($"finale_player_min_masks={FinalePlayerMinMasks}");
                 sb.AppendLine($"finale_player_max_masks={FinalePlayerMaxMasks}");
-                sb.AppendLine("# 殘局 boss 起始血＝真實滿血的百分比 [min,max]（與玩家面具解耦）。釘在 EVAL 死亡區");
-                sb.AppendLine("# ~0.33-0.44（=agent 平均打掉 ~74% 後死的剩餘血）＝集中練收尾。Python 端贏分按此 frac 縮，");
-                sb.AppendLine("# 消「局簡單卻領滿額收尾紅利」失真。boss_frac ≤ player_frac 由範圍保證(5-6面具≥0.56>0.44)。");
+                sb.AppendLine("# 殘局 boss 起始血＝真實滿血的百分比 [min,max]（與玩家面具各自抽、解耦）。建議 0.20-0.30：");
+                sb.AppendLine("# 玩家 AND boss 都釘在「真實 EVAL 死亡區」(打掉~77%後死的低血殊死)＝練 HUD-conditioned actor");
+                sb.AppendLine("# 真正會輸的低血收尾分支(舊 5-6 面具版練健康收殘血、HUD 情境不對不轉移)。boss 夠低才贏得到，");
+                sb.AppendLine("# boss_frac/player_frac 可重疊。boss_frac 僅供 Python ARMED log、不進 reward。");
                 sb.AppendLine($"finale_boss_min_frac={I(FinaleBossMinFrac)}");
                 sb.AppendLine($"finale_boss_max_frac={I(FinaleBossMaxFrac)}");
                 sb.AppendLine("# 開場等待上限(秒)：實際是等 boss FSM 離開開場 state(含 intro)才放行、提早結束；");
