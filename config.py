@@ -3,6 +3,8 @@ import os
 import tempfile
 from enum import Enum
 
+import numpy as np
+
 # ---- 動作空間 ----------------------------------------------------------------
 # 用 Enum 把「動作語意」與「實體按鍵」解耦：
 #   成員名稱 = 動作的意義（JUMP、DASH…），方便閱讀
@@ -35,6 +37,35 @@ N_ACTIONS = len(ACTIONS)
 # 鍵盤後端送鍵時「方向先就位、再動其他動作鍵」，確保如旋風斬/蓄力斬這類
 # 「放開攻擊瞬間讀方向」的劍技，attack edge 時讀到的是本 tick 的目標方向。
 DIRECTION_KEYS = frozenset(a.value for a in (Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT))
+
+# ---- 方向-Categorical 動作表徵（Dreamer 用；PPO 仍是 11 獨立 Bernoulli）--------
+# 上+下、左+右不可能同時按 → 把方向做成兩個 Categorical，消掉「矛盾取樣」的變異源。
+# 模型動作(13 維) = [垂直 onehot3 {無,上,下}, 水平 onehot3 {無,左,右}, 其餘 7 鍵 Bernoulli]。
+# env 實體動作仍是 11 維 MultiBinary（上下左右 + 7 鍵）；只在「送 env / 讀 demo」時轉換。
+# 依賴 Action 定義順序 idx: 0=UP 1=DOWN 2=LEFT 3=RIGHT 4..10=其餘 7 鍵。
+DIR_OTHER = N_ACTIONS - 4                     # 7（z x c v s a d）
+N_ACTIONS_MODEL = 3 + 3 + DIR_OTHER           # 13：兩個 Cat3 + 其餘 7 鍵
+
+
+def dir_model_to_env(m):
+    """13 維模型動作 -> 11 維 env MultiBinary（前導維任意）。onehot 槽已保證方向不矛盾。"""
+    m = np.asarray(m, np.float32)
+    up, down = m[..., 1], m[..., 2]           # 垂直 onehot 的 上/下 槽
+    left, right = m[..., 4], m[..., 5]         # 水平 onehot 的 左/右 槽
+    other = m[..., 6:]                          # 其餘 7 鍵
+    return np.concatenate([up[..., None], down[..., None],
+                           left[..., None], right[..., None], other], axis=-1)
+
+
+def dir_env_to_model(e):
+    """11 維 env MultiBinary -> 13 維模型動作（讀 demo 用；萬一同按上下/左右則上、左優先）。"""
+    e = np.asarray(e, np.float32)
+    up, down, left, right = e[..., 0], e[..., 1], e[..., 2], e[..., 3]
+    v_up = up; v_down = down * (1 - up); v_none = 1 - v_up - v_down
+    h_left = left; h_right = right * (1 - left); h_none = 1 - h_left - h_right
+    st = lambda *xs: np.stack(xs, axis=-1)
+    return np.concatenate([st(v_none, v_up, v_down),
+                           st(h_none, h_left, h_right), e[..., 4:]], axis=-1)
 
 # ---- 時序 --------------------------------------------------------------------
 # 控制 tick 頻率（Hz）。這是整個系統唯一的時鐘：擷取、按鍵取樣、reward 取樣都跟它對齊。
@@ -118,7 +149,7 @@ CURRICULUM_DROP_FLAG = os.path.join(tempfile.gettempdir(), "hk_curriculum_drop.f
 # 定向探索：讓 agent 從「殘血中後段」開局，多採樣最常死的收尾段（破 scale 0.70 平牆）。
 # 總閘：False 時 env.reset 完全不碰殘局邏輯（正常路徑逐位元不變）。要啟用須同時把 mod
 # config 的 finale_prob 設 >0 + 重 build mod + 重啟 HK。mod 決定殘局、Python 純反應。
-FINALE_ENABLED = True
+FINALE_ENABLED = False
 # mod 每場 fight-detect 寫此檔（finale=0/1、armed=0/1、true_max=int）；Python reset 反應。
 CURRICULUM_FINALE_FILE = os.path.join(tempfile.gettempdir(), "hk_curriculum_finale.txt")
 # 殘局 reset 等 armed（mod 設好殘局）的逾時秒數：等不到（mod 舊版未寫/未載入）就當正常場

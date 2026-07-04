@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+import config
 from dreamer_model import (DreamerConfig, WorldModel, Actor, Critic, TwoHot, feat_of)
 
 
@@ -16,31 +17,59 @@ class SequenceReplay:
     對齊慣例（與 RSSM.observe 一致）：index t 存「obs_t、導致 obs_t 的動作 a_{t-1}、
     抵達 obs_t 得到的 reward、cont_t(=1-done)」。第一步 action=0, reward=0, cont=1。
     """
-    def __init__(self, capacity_steps=200_000):
-        self.eps = []                 # 每個 ep: dict of np arrays
+    def __init__(self, capacity_steps=200_000, protected_weight=1):
+        self.eps = []                 # FIFO 主體：每個 ep dict of np arrays，超 cap 從頭驅逐
+        self.protected = []           # 不驅逐、不計入 cap（PPO 勝場 kickstart：保住「贏的起點」與 reward 刷新）
         self.cap = capacity_steps
-        self._n = 0
+        self.protected_weight = protected_weight   # 過抽倍數：sample 時勝場 episode 重複列入 → 想像更常從勝 posterior 起步
+        self._n = 0                   # 只計 FIFO 主體步數
+        self._protn = 0               # 保護區步數
 
-    def add_episode(self, obs, act, rew, cont):
+    def add_episode(self, obs, act, rew, cont, protect=False):
         ep = {"obs": np.asarray(obs, np.uint8), "act": np.asarray(act, np.float32),
               "rew": np.asarray(rew, np.float32), "cont": np.asarray(cont, np.float32)}
+        if protect:                                   # 永久保留，不驅逐、不計 cap
+            self.protected.append(ep); self._protn += len(ep["rew"]); return
         self.eps.append(ep)
         self._n += len(ep["rew"])
         while self._n > self.cap and len(self.eps) > 1:
             self._n -= len(self.eps.pop(0)["rew"])
 
+    def n_protected(self):
+        return len(self.protected)
+
     def __len__(self):
-        return self._n
+        return self._n + self._protn
 
     def can_sample(self, length):
-        return any(len(e["rew"]) >= length for e in self.eps)
+        return any(len(e["rew"]) >= length for e in self.eps) or \
+               any(len(e["rew"]) >= length for e in self.protected)
+
+    def save_protected(self, path):
+        torch.save(self.protected, path)             # 保護區持久化 → resume 免重跑 live PPO
+
+    def load_protected(self, path):
+        self.protected = torch.load(path)
+        self._protn = sum(len(e["rew"]) for e in self.protected)
 
     def sample(self, batch, length, device):
-        usable = [e for e in self.eps if len(e["rew"]) >= length]
+        # 勝場過抽 + 尾段偏抽（見 [[dreamer-zero-win-rootcause]]）：
+        # ①過抽：protected(勝場) 重複 protected_weight 次 → 被抽機率 ×weight。
+        # ②尾段偏抽：勝場 ~956 步、終局 +560 在最後幾步，uniform 抽到含終局 window ~1% → 勝利 credit 幾乎不進
+        #   imagination（reward head/λ-return 看不到 +560、horizon 15 也走不到）→ actor 學不會收尾。抽到勝場時
+        #   0.5 機率強制取「含終局末段」window，含 +560 機率 ~1%→~50%，勝訊號才進得了想像。非勝場維持 uniform。
+        fifo = [e for e in self.eps if len(e["rew"]) >= length]
+        prot = [e for e in self.protected if len(e["rew"]) >= length]
+        pool = fifo + prot * self.protected_weight
+        n_fifo = len(fifo)
         obs, act, rew, cont = [], [], [], []
         for _ in range(batch):
-            e = usable[np.random.randint(len(usable))]
-            s = np.random.randint(0, len(e["rew"]) - length + 1)
+            idx = np.random.randint(len(pool))
+            e = pool[idx]; L = len(e["rew"])
+            if idx >= n_fifo and np.random.rand() < 0.5:      # 勝場、0.5 機率取含終局末段
+                s = L - length
+            else:
+                s = np.random.randint(0, L - length + 1)      # uniform（非勝場，或勝場另 0.5）
             obs.append(e["obs"][s:s + length]); act.append(e["act"][s:s + length])
             rew.append(e["rew"][s:s + length]); cont.append(e["cont"][s:s + length])
         to = lambda x, dt: torch.as_tensor(np.stack(x), dtype=dt, device=device)
@@ -48,6 +77,20 @@ class SequenceReplay:
                 "act": to(act, torch.float32),                   # (B,L,A)
                 "rew": to(rew, torch.float32),                   # (B,L)
                 "cont": to(cont, torch.float32)}                 # (B,L)
+
+    def sample_protected(self, batch, length, device):
+        """只從保護區（勝場 demo）**均勻**抽序列，供 latent-BC（要涵蓋整條軌跡 → 不用尾段偏抽）。
+        無可用（保護區空/太短）回 None。只需 obs+act（BC 不用 reward/cont）。"""
+        usable = [e for e in self.protected if len(e["rew"]) >= length]
+        if not usable:
+            return None
+        obs, act = [], []
+        for _ in range(batch):
+            e = usable[np.random.randint(len(usable))]; L = len(e["rew"])
+            s = np.random.randint(0, L - length + 1)
+            obs.append(e["obs"][s:s + length]); act.append(e["act"][s:s + length])
+        to = lambda x, dt: torch.as_tensor(np.stack(x), dtype=dt, device=device)
+        return {"obs": to(obs, torch.uint8).float() / 255.0, "act": to(act, torch.float32)}
 
 
 # ---------------- λ-return（想像軌跡上）----------------
@@ -88,13 +131,16 @@ class DreamerLearner:
 
     @torch.no_grad()
     def act(self, obs_np, state, prev_action, deterministic=False):
-        """obs_np: (C,H,W) float[0,1]。回傳 (action_np uint8, new_state, action_tensor)。"""
+        """obs_np: (C,H,W) float[0,1]。
+        回傳 (env_action uint8[11] 送 env, model_action float[13] 存 replay/餵 RSSM, new_state, model_tensor)。"""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device).unsqueeze(0)
         embed = self.wm.encode(obs)
         post, _, _ = self.wm.rssm.obs_step(state, prev_action, embed)
         feat = feat_of(post)
-        a = self.actor.act(feat, deterministic)
-        return a.squeeze(0).cpu().numpy().astype(np.uint8), post, a
+        a = self.actor.act(feat, deterministic)                       # (1,13) 模型動作
+        a_model = a.squeeze(0).cpu().numpy().astype(np.float32)
+        a_env = config.dir_model_to_env(a_model).astype(np.uint8)     # (11,) 送 actuator
+        return a_env, a_model, post, a
 
     # ---- world model 更新 ----
     def _wm_loss(self, batch):
@@ -160,20 +206,47 @@ class DreamerLearner:
         logp, ent = [], []
         for t in range(cfg.horizon):
             d = self.actor.dist(feat_list[t].detach())
-            logp.append(d.log_prob(actions[t]).sum(-1))
-            ent.append(d.entropy().sum(-1))
+            logp.append(d.log_prob(actions[t]))      # 混合分布 log_prob/entropy 已對各分量加總
+            ent.append(d.entropy())
         logp = torch.stack(logp, 0); ent = torch.stack(ent, 0)
         actor_loss = -(logp * adv).mean() - cfg.actor_ent * ent.mean()
         return actor_loss, critic_loss, {"imag_ret": ret.mean().item(),
-                                         "ret_denom": denom, "ent": ent.mean().item()}
+                                         "ret_denom": denom, "ent": ent.mean().item(),
+                                         # 診斷 actor 崩壞：denom 是否黏在 1.0(=return spread<1 被 clamp)、
+                                         # adv 量級是否極小(=熵項相對變強)、想像 reward 是否有信號(std≈0=reward head 恆吐 0)
+                                         "adv_absmean": adv.detach().abs().mean().item(),
+                                         "adv_std": adv.detach().std().item(),
+                                         "imag_rew_std": reward.detach().std().item()}
 
-    def train_step(self, batch):
+    def _bc_loss(self, demo_batch):
+        """latent-BC：把 demo obs 經(當前)WM 編成潛在、監督 actor 從潛在預測 demo 動作。
+        WM 編碼在 no_grad 下（BC 只訓 actor、不回傳 WM；WM 由 _wm_loss 訓）。回傳 -log_prob(demo action)。
+        對齊：replay 慣例 act[t]=導致 obs_t 的動作(a_{t-1})；actor 在 latent(obs_t) 要預測「在 obs_t 採取的動作」
+        ＝act[t+1]。故用 feat[:, :-1] 配 target act[:, 1:]（也順帶避開 act[0]=zeros 的非法 one-hot）。"""
+        B, L = demo_batch["obs"].shape[:2]
+        C = demo_batch["obs"].shape[2]
+        with torch.no_grad():
+            embed = self.wm.encode(demo_batch["obs"].reshape(B * L, C, *demo_batch["obs"].shape[3:])).reshape(B, L, -1)
+            feats, _, _, _ = self.wm.rssm.observe(embed, demo_batch["act"], self.wm.rssm.initial(B, self.device))
+        feat = feats[:, :-1].reshape(B * (L - 1), -1)            # latent(obs_0..obs_{L-2})
+        tgt = demo_batch["act"][:, 1:].reshape(B * (L - 1), -1)  # 在該 obs 採取的動作＝act[1..L-1]（全合法 one-hot）
+        return -self.actor.dist(feat).log_prob(tgt).mean()
+
+    def train_step(self, batch, demo_batch=None, bc_weight=0.0):
+        # Dreamer 內部 reward 放大（全成分同乘 K；見 cfg.reward_scale）。在 world model 入口乘一次即可：
+        # reward predictor 學放大後的目標 → 想像用 predictor 輸出 → returns/denom/critic 全在放大空間、自洽。
+        # 存進 replay 的仍是原始 reward（可隨時改 K 免重收）；env/config.RW_* 不動、PPO 免疫。
+        batch = {**batch, "rew": batch["rew"] * self.cfg.reward_scale}
         wm_loss, feats, wm_stats = self._wm_loss(batch)
         self.opt_wm.zero_grad(); wm_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.wm.parameters(), 100.0)
         self.opt_wm.step()
 
         actor_loss, critic_loss, ac_stats = self._imagine_ac_loss(feats)
+        if demo_batch is not None and bc_weight > 0:          # latent-BC：把 actor 拉向 demo 勝場動作（治 reachability）
+            bc = self._bc_loss(demo_batch)
+            actor_loss = actor_loss + bc_weight * bc
+            ac_stats["bc_loss"] = bc.item()
         self.opt_ac.zero_grad(); (actor_loss + critic_loss).backward()
         torch.nn.utils.clip_grad_norm_(list(self.actor.parameters()) + list(self.critic.parameters()), 100.0)
         self.opt_ac.step()
@@ -203,7 +276,7 @@ def _selftest():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = DreamerConfig(batch=2, length=8, horizon=5, deter=64, stoch=8, classes=8,
                         hidden=64, cnn_depth=16)
-    C, A = config.NET_CHANNELS, config.N_ACTIONS
+    C, A = config.NET_CHANNELS, config.N_ACTIONS_MODEL   # 模型動作 13 維（方向-Categorical）
     learner = DreamerLearner(cfg, C, A, dev)
     rep = SequenceReplay()
     for _ in range(3):
@@ -218,8 +291,8 @@ def _selftest():
     # 線上行動
     state, a = learner.init_state()
     obs = np.random.rand(C, config.NET_SIZE, config.NET_SIZE).astype(np.float32)
-    act, state, a = learner.act(obs, state, a)
-    print("act OK: action shape", act.shape, "sum", int(act.sum()))
+    a_env, a_model, state, a = learner.act(obs, state, a)
+    print(f"act OK: env action {a_env.shape} sum={int(a_env.sum())}, model action {a_model.shape}")
     assert np.isfinite(st["wm_loss"]) and np.isfinite(st["actor_loss"])
     print("[OK] dreamer 自測通過")
 

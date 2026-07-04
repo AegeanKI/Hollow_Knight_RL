@@ -82,6 +82,8 @@ class HollowKnightEnv:
         self._next_t = 0.0
         self._ep_wall0 = None   # fps 診斷：本場牆鐘起點
         self._over_runs = []    # fps 診斷：本場各 over-tick 的 (tick_idx, 超出 66.7ms 預算的秒數)
+        self._max_grab = (0.0, -1)  # fps 診斷：本場最慢一次擷取 (秒, tick_idx)
+        self._max_tele = (0.0, -1)  # fps 診斷：本場最慢一次遙測讀取 (秒, tick_idx)
         self._steps = 0
         self._prev_boss = None
         self._prev_player = None
@@ -208,6 +210,8 @@ class HollowKnightEnv:
                 # fps 診斷：時鐘改在第一個 step 才錨定（讓 reset→首次冷推論落在計時外）；此處只清狀態
                 self._ep_wall0 = None
                 self._over_runs = []
+                self._max_grab = (0.0, -1)
+                self._max_tele = (0.0, -1)
                 return self.stacker.get(), {"critic_extra": self._critic_extra(tele)}
             wait = min(1.0 * (attempt + 1), 5.0)     # 退避：1,2,3,4,5,5...
             print(f"  reset 第 {attempt + 1}/{max_retries} 次未成功，{wait:.0f}s 後重試...")
@@ -260,9 +264,17 @@ class HollowKnightEnv:
         self.act.apply_vec(action_vec)
         self._wait_tick()                       # 維持 15Hz
 
+        _t = time.perf_counter()
         self.stacker.push(self.cap.grab_raw())
         obs = self.stacker.get()
+        g = time.perf_counter() - _t                 # fps 診斷：本 tick 擷取耗時
+        if g > self._max_grab[0]:
+            self._max_grab = (g, self._steps)
+        _t = time.perf_counter()
         tele = self._read_tele()
+        e = time.perf_counter() - _t                 # fps 診斷：本 tick 遙測讀取耗時
+        if e > self._max_tele[0]:
+            self._max_tele = (e, self._steps)
         self._steps += 1
         self._tele_total += 1                  # B4：統計遙測健康度
         if tele is not None:
@@ -293,6 +305,8 @@ class HollowKnightEnv:
             elapsed = time.perf_counter() - self._ep_wall0 if self._ep_wall0 else 0.0
             info["fps"] = self._steps / elapsed if elapsed > 0 else 0.0
             info["over_runs"] = sorted(self._over_runs, key=lambda t: t[1], reverse=True)
+            info["max_grab"] = self._max_grab       # (秒, tick) 本場最慢擷取
+            info["max_tele"] = self._max_tele       # (秒, tick) 本場最慢遙測
             if config.TELEMETRY_DUMP:  # 本場結束 → 覆蓋寫遙測 dump 供檢查
                 self.rx.mark(f"EP_END result={info.get('result')} finale={self._finale}")
                 self.rx.dump_recording(config.TELEMETRY_DUMP_FILE)

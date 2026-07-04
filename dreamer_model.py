@@ -1,8 +1,8 @@
 """DreamerV3 模型元件（world model + 想像用 actor-critic），與訓練迴圈解耦。
 
 只看畫面：encoder 吃 env 的疊幀觀測 (NET_CHANNELS×NET_SIZE×NET_SIZE)，RSSM 在潛在空間
-學動態；reward/continue/decoder 頭 + 在「想像」中訓練的 actor/critic。動作沿用 11 鍵
-獨立 Bernoulli（MultiBinary）。
+學動態；reward/continue/decoder 頭 + 在「想像」中訓練的 actor/critic。動作＝方向-Categorical
+（垂直/水平各一個 Cat3 + 其餘 7 鍵 Bernoulli，13 維；見 config `N_ACTIONS_MODEL`/轉換）。
 
 忠實度（DreamerV3 要點都有）：symlog two-hot 的 reward/value、categorical 潛在 +
 straight-through、KL balancing + free bits、EMA slow critic、percentile return 正規化。
@@ -38,7 +38,12 @@ class DreamerConfig:
     beta_dyn: float = 0.5       # dynamics KL 權重
     beta_rep: float = 0.1       # representation KL 權重
     unimix: float = 0.01        # 1% 均勻混入，避免 categorical 太尖
-    actor_ent: float = 3e-4     # actor 熵係數
+    actor_ent: float = 1e-4     # actor 熵係數（3e-4→1e-4：Layer-1 後的 de-commit 穩定器，見 [[dreamer-zero-win-rootcause]]；
+                                # 恆定 3e-4 熵力壓過缺正-adv 的 reinforce → policy 擴散回隨機。可 --actor-ent 覆寫）
+    reward_scale: float = 20.0  # Dreamer 內部 reward 放大（全成分同乘）：env dense ~0.026/步太小、
+                                # 在 symlog[-20,20]/255bin 是次 bin → reward predictor 塌成常數(imag_rew_std≈0)、
+                                # 且 return spread<1 使 denom clamp 在 1.0 → advantage 失去量級與方向。×20 讓
+                                # dense→~0.5/步(~3bin)、predictor 學得出結構、denom 脫離 clamp。不動 config.RW_*（PPO 共用）
     slow_tau: float = 0.02      # critic EMA 慢目標更新率
     lr_model: float = 1e-4
     lr_ac: float = 3e-5
@@ -230,21 +235,44 @@ class WorldModel(nn.Module):
         return self.encoder(obs)
 
 
-# ---------- Actor / Critic（潛在空間；動作=11 獨立 Bernoulli）----------
+# ---------- Actor / Critic（潛在空間）----------
+# 動作＝方向-Categorical：垂直 Cat3{無,上,下} + 水平 Cat3{無,左,右} + 其餘 7 鍵 Bernoulli。
+# 動作向量佈局＝config 的 13 維模型動作 [vert onehot3, horiz onehot3, 其餘 7 bit]。
+# 消掉「上+下/左+右同取樣」的矛盾＝變異源；log_prob/entropy 已對各分量加總、回傳 (...)。
+class MixedDirDist:
+    def __init__(self, logits):                # logits: (..., 13)
+        self.vert = torch.distributions.OneHotCategorical(logits=logits[..., 0:3])
+        self.horiz = torch.distributions.OneHotCategorical(logits=logits[..., 3:6])
+        self.other = torch.distributions.Bernoulli(logits=logits[..., 6:])
+
+    def sample(self):
+        return torch.cat([self.vert.sample(), self.horiz.sample(), self.other.sample()], -1)
+
+    def mode(self):                            # 決定性：argmax onehot + (logit>0)
+        def oh(d):
+            return F.one_hot(d.logits.argmax(-1), d.logits.shape[-1]).float()
+        return torch.cat([oh(self.vert), oh(self.horiz), (self.other.logits > 0).float()], -1)
+
+    def log_prob(self, a):                     # a: (..., 13) -> (...) 已加總
+        return (self.vert.log_prob(a[..., 0:3]) + self.horiz.log_prob(a[..., 3:6])
+                + self.other.log_prob(a[..., 6:]).sum(-1))
+
+    def entropy(self):                         # (...) 已加總
+        return self.vert.entropy() + self.horiz.entropy() + self.other.entropy().sum(-1)
+
+
 class Actor(nn.Module):
-    def __init__(self, cfg, action_dim):
+    def __init__(self, cfg, action_dim):       # action_dim = config.N_ACTIONS_MODEL (13)
         super().__init__()
         self.net = nn.Sequential(_mlp([cfg.feat_dim, cfg.hidden, cfg.hidden]),
                                  nn.SiLU(), nn.Linear(cfg.hidden, action_dim))
 
     def dist(self, feat):
-        return torch.distributions.Bernoulli(logits=self.net(feat))
+        return MixedDirDist(self.net(feat))
 
     def act(self, feat, deterministic=False):
-        logits = self.net(feat)
-        if deterministic:
-            return (logits > 0).float()
-        return torch.distributions.Bernoulli(logits=logits).sample()
+        d = MixedDirDist(self.net(feat))
+        return d.mode() if deterministic else d.sample()
 
 
 class Critic(nn.Module):
