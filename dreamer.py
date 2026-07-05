@@ -17,11 +17,12 @@ class SequenceReplay:
     對齊慣例（與 RSSM.observe 一致）：index t 存「obs_t、導致 obs_t 的動作 a_{t-1}、
     抵達 obs_t 得到的 reward、cont_t(=1-done)」。第一步 action=0, reward=0, cont=1。
     """
-    def __init__(self, capacity_steps=200_000, protected_weight=1):
+    def __init__(self, capacity_steps=200_000, protected_weight=1, tail_bias_prob=0.5):
         self.eps = []                 # FIFO 主體：每個 ep dict of np arrays，超 cap 從頭驅逐
         self.protected = []           # 不驅逐、不計入 cap（PPO 勝場 kickstart：保住「贏的起點」與 reward 刷新）
         self.cap = capacity_steps
         self.protected_weight = protected_weight   # 過抽倍數：sample 時勝場 episode 重複列入 → 想像更常從勝 posterior 起步
+        self.tail_bias_prob = tail_bias_prob       # 尾段偏抽機率：抽到勝場時多大機率強取「含終局末段」window（0=關）
         self._n = 0                   # 只計 FIFO 主體步數
         self._protn = 0               # 保護區步數
 
@@ -53,11 +54,12 @@ class SequenceReplay:
         self._protn = sum(len(e["rew"]) for e in self.protected)
 
     def sample(self, batch, length, device):
-        # 勝場過抽 + 尾段偏抽（見 [[dreamer-zero-win-rootcause]]）：
-        # ①過抽：protected(勝場) 重複 protected_weight 次 → 被抽機率 ×weight。
-        # ②尾段偏抽：勝場 ~956 步、終局 +560 在最後幾步，uniform 抽到含終局 window ~1% → 勝利 credit 幾乎不進
-        #   imagination（reward head/λ-return 看不到 +560、horizon 15 也走不到）→ actor 學不會收尾。抽到勝場時
-        #   0.5 機率強制取「含終局末段」window，含 +560 機率 ~1%→~50%，勝訊號才進得了想像。非勝場維持 uniform。
+        # 勝場過抽 + 尾段偏抽（見 [[dreamer-zero-win-rootcause]]；兩者都可調/可關）：
+        # ①過抽：protected(勝場) 重複 protected_weight 次 → 被抽機率 ×weight（=1 關）。
+        # ②尾段偏抽：抽到勝場時 tail_bias_prob 機率強取「含終局末段」window（=0 關，全 uniform）。
+        #   加它是為了把 +560 勝場終局塞進 imagination（reward head 才學得到 +28）。**但 reward head 學會後，
+        #   過強的過抽/尾段偏抽會讓想像 return 變雙峰（近勝收尾 ~560 vs 滿血全場 ~8）→ 撐大 ret_denom → 稀釋
+        #   advantage、且想像偏樂觀（偏練收尾、actor 實戰到不了）。學會 +28 後可調小/關，把訊號拉回全場戰鬥。
         fifo = [e for e in self.eps if len(e["rew"]) >= length]
         prot = [e for e in self.protected if len(e["rew"]) >= length]
         pool = fifo + prot * self.protected_weight
@@ -66,10 +68,10 @@ class SequenceReplay:
         for _ in range(batch):
             idx = np.random.randint(len(pool))
             e = pool[idx]; L = len(e["rew"])
-            if idx >= n_fifo and np.random.rand() < 0.5:      # 勝場、0.5 機率取含終局末段
-                s = L - length
+            if idx >= n_fifo and self.tail_bias_prob > 0 and np.random.rand() < self.tail_bias_prob:
+                s = L - length                                # 勝場、tail_bias_prob 機率取含終局末段
             else:
-                s = np.random.randint(0, L - length + 1)      # uniform（非勝場，或勝場另 0.5）
+                s = np.random.randint(0, L - length + 1)      # uniform（非勝場，或勝場另一機率）
             obs.append(e["obs"][s:s + length]); act.append(e["act"][s:s + length])
             rew.append(e["rew"][s:s + length]); cont.append(e["cont"][s:s + length])
         to = lambda x, dt: torch.as_tensor(np.stack(x), dtype=dt, device=device)
@@ -78,10 +80,9 @@ class SequenceReplay:
                 "rew": to(rew, torch.float32),                   # (B,L)
                 "cont": to(cont, torch.float32)}                 # (B,L)
 
-    def sample_protected(self, batch, length, device):
-        """只從保護區（勝場 demo）**均勻**抽序列，供 latent-BC（要涵蓋整條軌跡 → 不用尾段偏抽）。
-        無可用（保護區空/太短）回 None。只需 obs+act（BC 不用 reward/cont）。"""
-        usable = [e for e in self.protected if len(e["rew"]) >= length]
+    def _sample_obs_act(self, pool, batch, length, device):
+        """從 pool（episode list）均勻抽 obs+act 序列窗（BC/DAgger 用，不需 reward/cont）。空回 None。"""
+        usable = [e for e in pool if len(e["rew"]) >= length]
         if not usable:
             return None
         obs, act = [], []
@@ -91,6 +92,15 @@ class SequenceReplay:
             obs.append(e["obs"][s:s + length]); act.append(e["act"][s:s + length])
         to = lambda x, dt: torch.as_tensor(np.stack(x), dtype=dt, device=device)
         return {"obs": to(obs, torch.uint8).float() / 255.0, "act": to(act, torch.float32)}
+
+    def sample_protected(self, batch, length, device):
+        """只從保護區（勝場 demo）**均勻**抽序列，供 latent-BC（要涵蓋整條軌跡 → 不用尾段偏抽）。"""
+        return self._sample_obs_act(self.protected, batch, length, device)
+
+    def sample_fifo(self, batch, length, device):
+        """只從 FIFO 主體（**actor 自己走到的狀態**）均勻抽序列，供 DAgger（對這些狀態查專家當 target）。
+        FIFO 空（resume 剛開跑、尚未 collect）回 None → 該步略過 DAgger。"""
+        return self._sample_obs_act(self.eps, batch, length, device)
 
 
 # ---------------- λ-return（想像軌跡上）----------------
@@ -104,6 +114,16 @@ def lambda_return(reward, value, cont, gamma, lam):
         R[t] = reward[t] + gamma * cont[t] * ((1 - lam) * value[t + 1] + lam * nxt)
         nxt = R[t]
     return torch.stack(R, 0)
+
+
+def _env11_to_model13_t(e):
+    """torch 版 11 維 env 動作 → 13 維方向-Cat 模型動作（DAgger 查 PPO 後轉；規則同 train_dreamer
+    `_env11_to_model13`：方向衝突→「無」）。e: (..., 11) -> (..., 13)。"""
+    up, down, left, right = e[..., 0], e[..., 1], e[..., 2], e[..., 3]
+    v_up = up * (1 - down); v_down = down * (1 - up); v_none = 1 - v_up - v_down
+    h_left = left * (1 - right); h_right = right * (1 - left); h_none = 1 - h_left - h_right
+    return torch.cat([torch.stack([v_none, v_up, v_down], -1),
+                      torch.stack([h_none, h_left, h_right], -1), e[..., 4:]], -1)
 
 
 # ---------------- Learner（world model + 想像 actor-critic）----------------
@@ -121,6 +141,11 @@ class DreamerLearner:
         self.opt_wm = torch.optim.Adam(self.wm.parameters(), cfg.lr_model)
         self.opt_ac = torch.optim.Adam(list(self.actor.parameters()) + list(self.critic.parameters()), cfg.lr_ac)
         self.ret_lo, self.ret_hi = 0.0, 1.0              # return 百分位 EMA（正規化用）
+        self.expert = None                               # DAgger 專家（PPO ActorCritic）；--bc-mode dagger 時 set
+
+    def set_expert(self, expert):
+        """DAgger 用：掛上可查詢的專家 policy（PPO）。expert.forward(obs,None)->(logits(B,11),_)。"""
+        self.expert = expert
 
     # ---- 線上行動（收集時用；維護 RSSM 隱狀態）----
     @torch.no_grad()
@@ -232,7 +257,23 @@ class DreamerLearner:
         tgt = demo_batch["act"][:, 1:].reshape(B * (L - 1), -1)  # 在該 obs 採取的動作＝act[1..L-1]（全合法 one-hot）
         return -self.actor.dist(feat).log_prob(tgt).mean()
 
-    def train_step(self, batch, demo_batch=None, bc_weight=0.0):
+    def _dagger_loss(self, fifo_batch):
+        """DAgger：對 **actor 自己走到的狀態**（FIFO obs）查專家 PPO 當 target → 監督 actor 預測。
+        治 covariate shift（demo-BC 只覆蓋 demo 狀態、actor 到不了）。對齊：查 π_PPO(obs_t)＝「在 obs_t 當下
+        該做的動作」，與 latent(obs_t)＝feat_t **同格、不位移**（跟 demo-BC 位移一格不同）；PPO 恆吐合法動作、
+        無 act[0]=zeros 問題，故用全部 t。RSSM 用 FIFO 自己的 act 捲 latent（真實 transition）。"""
+        B, L = fifo_batch["obs"].shape[:2]
+        C = fifo_batch["obs"].shape[2]
+        obs_flat = fifo_batch["obs"].reshape(B * L, C, *fifo_batch["obs"].shape[3:])
+        with torch.no_grad():
+            logits, _ = self.expert.forward(obs_flat, None)          # (B*L, 11) PPO logits（extra=None 只算 actor）
+            a_env = (torch.sigmoid(logits) > 0.5).float()            # deterministic 專家動作（11 維）
+            a_ppo = _env11_to_model13_t(a_env)                       # (B*L, 13) 方向-Cat（衝突→無，同 seed_from_ppo）
+            embed = self.wm.encode(obs_flat).reshape(B, L, -1)
+            feats, _, _, _ = self.wm.rssm.observe(embed, fifo_batch["act"], self.wm.rssm.initial(B, self.device))
+        return -self.actor.dist(feats.reshape(B * L, -1)).log_prob(a_ppo).mean()
+
+    def train_step(self, batch, bc_batch=None, bc_weight=0.0, bc_mode="demo"):
         # Dreamer 內部 reward 放大（全成分同乘 K；見 cfg.reward_scale）。在 world model 入口乘一次即可：
         # reward predictor 學放大後的目標 → 想像用 predictor 輸出 → returns/denom/critic 全在放大空間、自洽。
         # 存進 replay 的仍是原始 reward（可隨時改 K 免重收）；env/config.RW_* 不動、PPO 免疫。
@@ -243,8 +284,8 @@ class DreamerLearner:
         self.opt_wm.step()
 
         actor_loss, critic_loss, ac_stats = self._imagine_ac_loss(feats)
-        if demo_batch is not None and bc_weight > 0:          # latent-BC：把 actor 拉向 demo 勝場動作（治 reachability）
-            bc = self._bc_loss(demo_batch)
+        if bc_batch is not None and bc_weight > 0:            # BC/DAgger：把 actor 拉向專家動作（治 reachability）
+            bc = self._dagger_loss(bc_batch) if bc_mode == "dagger" else self._bc_loss(bc_batch)
             actor_loss = actor_loss + bc_weight * bc
             ac_stats["bc_loss"] = bc.item()
         self.opt_ac.zero_grad(); (actor_loss + critic_loss).backward()

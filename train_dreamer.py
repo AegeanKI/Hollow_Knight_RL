@@ -284,8 +284,11 @@ def parse_args():
     ap.add_argument("--actor-ent-anneal-continue", action="store_true",
                     help="過 anneal-eps 後不維持終點值，而是同幾何速率繼續下降（每 anneal-eps 再降 10×，floor 1e-6）")
     ap.add_argument("--protected-weight", type=int, default=2,
-                    help="seed-ppo 勝場保護區的過抽倍數：sample 時勝場 episode 重複列入，讓想像更常從勝 posterior 起步"
-                         "（re-commit 的 root driver）。1=不過抽；建議 2（>3 易過擬 18 場勝的低多樣性）")
+                    help="保護區勝場的過抽倍數：sample 時勝場 episode 重複列入，讓想像更常從勝 posterior 起步。"
+                         "1=不過抽。⚠ reward head 學會 +28 後，過抽會讓想像 return 雙峰→稀釋 advantage，這時設 1")
+    ap.add_argument("--tail-bias-prob", type=float, default=0.5,
+                    help="尾段偏抽機率：抽到勝場時多大機率強取『含終局末段』window（把 +560 塞進想像）。0=關(全 uniform)。"
+                         "⚠ 同過抽，reward head 學會後設 0/小值把 advantage 訊號拉回全場戰鬥（治想像-現實落差）")
     ap.add_argument("--eval-every", type=int, default=10, help="每幾場 eval 一次（0=關）")
     ap.add_argument("--eval-episodes", type=int, default=5)
     ap.add_argument("--seed-demos", type=int, default=0, help="開跑前用幾場 demo 暖機 world model")
@@ -298,7 +301,12 @@ def parse_args():
     ap.add_argument("--bc-anneal-eps", type=int, default=250,
                     help="BC 權重從 --bc-weight 線性衰減到 0 跨幾場 ep（之後純 RL）")
     ap.add_argument("--bc-warmup-eps", type=int, default=20,
-                    help="BC 前先讓 WM 暖機幾場（latent-BC 需 WM latent 有意義；這幾場 BC=0，之後才開始衰減）")
+                    help="BC 前先讓 WM 暖機幾場（latent-BC 需 WM latent 有意義；這幾場 BC=0，之後才開始衰減）。"
+                         "⚠ resume 上 DAgger 時設成『當前 ep』讓它從現在起（WM 已成熟不用真暖機）")
+    ap.add_argument("--bc-mode", choices=["demo", "dagger"], default="demo",
+                    help="BC 來源：demo=latent-BC 模仿 demo 勝場動作（只覆蓋 demo 狀態、有 covariate shift）；"
+                         "dagger=對 **actor 自己走到的狀態(FIFO)** 查專家 PPO 當 target（治 covariate shift，"
+                         "務實把 actor 拉到 ~PPO 級）。dagger 需 --seed-ppo-ckpt 指到 PPO；BC 權重排程共用 --bc-*")
     ap.add_argument("--seed-ppo-wins-det", type=int, default=0,
                     help="用 PPO 灌『幾場 deterministic 勝』進保護區（含真實 reward+勝場終局，破零勝死結）。"
                          "用勝場數控制、非場數 → 保護區組成精準、不驟增驟減")
@@ -356,12 +364,14 @@ def main():
         f"(device={device}, batch={cfg.batch}, length={cfg.length}, "
         f"train_steps/ep={args.train_steps}, replay_cap={args.replay_steps}, "
         f"reward_scale={cfg.reward_scale}, actor_ent={ent_tag}, "
-        f"protected_weight={args.protected_weight}, "
+        f"protected_weight={args.protected_weight}, tail_bias={args.tail_bias_prob}, "
+        f"bc={args.bc_mode}@{args.bc_weight}, "
         f"seed_ppo_wins=det{args.seed_ppo_wins_det}/sto{args.seed_ppo_wins_sto}) =====")
 
     seed_ppo_total = args.seed_ppo_wins_det + args.seed_ppo_wins_sto
     learner = DreamerLearner(cfg, config.NET_CHANNELS, config.N_ACTIONS_MODEL, device)
-    replay = SequenceReplay(capacity_steps=args.replay_steps, protected_weight=args.protected_weight)
+    replay = SequenceReplay(capacity_steps=args.replay_steps, protected_weight=args.protected_weight,
+                            tail_bias_prob=args.tail_bias_prob)
     if seed_ppo_total > 0 and os.path.exists(PPO_WINS):   # 勝場保護區持久化：resume 直接載回、免重跑 live PPO
         replay.load_protected(PPO_WINS)
         log(f"載入勝場保護區 {replay.n_protected()} 場 from {PPO_WINS}（不驅逐、免重跑 live seeding）")
@@ -383,6 +393,17 @@ def main():
     if args.seed_demos > 0:
         seed_from_demos(replay, args.seed_demos, real_reward=args.seed_demos_reward,
                         protect=args.seed_demos_reward)
+
+    if args.bc_mode == "dagger" and args.bc_weight > 0:   # DAgger：掛上 PPO 專家（訓練全程 query，非只 seed）
+        from ac_model import ActorCritic
+        if not os.path.exists(args.seed_ppo_ckpt):
+            raise FileNotFoundError(f"--bc-mode dagger 需 PPO 專家，找不到 {args.seed_ppo_ckpt}")
+        expert = ActorCritic().to(device)
+        expert.load_compat(torch.load(args.seed_ppo_ckpt, map_location=device)["model"]); expert.eval()
+        for p in expert.parameters():
+            p.requires_grad_(False)
+        learner.set_expert(expert)
+        log(f"  [DAgger] 掛上 PPO 專家 {args.seed_ppo_ckpt}（對 actor 自己走到的狀態查它當 target）")
 
     # 長壽物件（模型、暖機 replay、resume 進來的狀態）都建好了 → 移進永久世代，GC 永不再掃它們。
     gc.freeze()
@@ -465,9 +486,12 @@ def main():
                 for _ in range(args.train_steps):
                     if ctrl.should_stop():
                         break
-                    demo_b = replay.sample_protected(cfg.batch, cfg.length, device) if bc_w > 0 else None
+                    bc_b = None
+                    if bc_w > 0:                                  # demo=保護區(demo 狀態)；dagger=FIFO(actor 自己的狀態)
+                        bc_b = (replay.sample_fifo if args.bc_mode == "dagger"
+                                else replay.sample_protected)(cfg.batch, cfg.length, device)
                     st = learner.train_step(replay.sample(cfg.batch, cfg.length, device),
-                                            demo_batch=demo_b, bc_weight=bc_w)
+                                            bc_batch=bc_b, bc_weight=bc_w, bc_mode=args.bc_mode)
                     for k, v in st.items():
                         accum[k] = accum.get(k, 0.0) + v
                 stats = {k: v / max(1, args.train_steps) for k, v in accum.items()}
@@ -475,7 +499,7 @@ def main():
                     f"actor={stats['actor_loss']:.3f} critic={stats['critic_loss']:.3f} "
                     f"dyn={stats['dyn']:.2f} rep={stats['rep']:.2f} imag_ret={stats['imag_ret']:.3f} "
                     f"ent={stats['ent']:.2f} aent={cfg.actor_ent:.1e}"
-                    + (f" bc={stats.get('bc_loss', float('nan')):.3f}@{bc_w:.2f}" if bc_w > 0 else ""))
+                    + (f" {args.bc_mode}={stats.get('bc_loss', float('nan')):.3f}@{bc_w:.2f}" if bc_w > 0 else ""))
                 # actor 崩壞判因：denom 黏 1.0＝return spread 被 clamp；adv 極小＝熵項相對主導；
                 # rew_std≈0＝想像 reward 無信號(放大也是放大雜訊)。三者一起讀才判得出病因（見 memory）。
                 log(f"    :  [diag] ret_denom={stats.get('ret_denom', float('nan')):.3f} "
