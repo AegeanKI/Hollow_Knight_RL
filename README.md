@@ -9,7 +9,7 @@
 
 ## 環境
 
-- Python：conda 環境 `hk`（直譯器 `C:\Users\shenchi\.conda\envs\hk\python.exe`）。
+- Python：conda 環境 `hk`（`conda create -n hk python=3.11` 後 `conda activate hk`；以下指令都在這個環境下跑）。
 - 套件：`pip install -r requirements.txt`（torch / opencv / mss / pynput / pydirectinput / vgamepad …）。
 - GPU：RTX 3070（CNN 在 15Hz 預算內推論綽綽有餘）。
 - 遊戲：HK 實際生效安裝在 **D 槽**（`D:\...\Hollow Knight`）；mod 要 build/部署到 D 那份才會載入。
