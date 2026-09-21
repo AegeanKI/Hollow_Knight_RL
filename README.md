@@ -7,6 +7,15 @@
 
 > reward 來自一個 C# mod 透過 UDP 回傳的血量遙測——這只當訓練訊號，**不進模型輸入**，所以「只看畫面」的設定不被破壞。
 
+## Demo
+
+PPO agent 純看畫面打調諧級大黃蜂（2026-09-21 錄製），兩種輸入後端：
+
+| 手把後端 (`--input gamepad`) | 鍵盤後端 (`--input keyboard`) |
+|:---:|:---:|
+| [![PPO - gamepad](https://i.ytimg.com/vi/oYOyt0e61fc/hqdefault.jpg)](https://www.youtube.com/watch?v=oYOyt0e61fc) | [![PPO - keyboard](https://i.ytimg.com/vi/4JnAc4u-Je0/hqdefault.jpg)](https://www.youtube.com/watch?v=4JnAc4u-Je0) |
+| [YouTube](https://www.youtube.com/watch?v=oYOyt0e61fc) | [YouTube](https://www.youtube.com/watch?v=4JnAc4u-Je0) |
+
 ---
 
 ## 環境
