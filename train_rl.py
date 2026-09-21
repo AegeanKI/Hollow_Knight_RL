@@ -1,4 +1,7 @@
-"""PPO 微調：從 BC 權重出發，在真實大黃蜂戰鬥中學習。
+"""PPO：從隨機初始化的權重開始，在真實大黃蜂戰鬥中學習。
+
+- 預設**不**載入 BC 權重。階段1 的 BC 只是可行性驗證（證明純看畫面能操作角色），
+  戰鬥策略由 RL 自己從 reward 學起；要熱啟動策略頭再加 --init-bc。
 
 - 動作隨機取樣（探索），每 EPISODES_PER_UPDATE 場（預設 8）做一次 PPO 更新。
 - 更新發生在 episode 之間（人在雕像大廳、不在戰鬥），不搶即時操作的 GPU。
@@ -19,7 +22,8 @@ Checkpoint（都在 checkpoints/，內含 模型+optimizer+更新次數+場數�
 掉包率），方便畫曲線/跨 run 比較；判斷是否進步看這條曲線，不看單點。
 
 用法：
-  python train_rl.py                       # 全新：從 bc.pt 初始化開始
+  python train_rl.py                       # 全新：隨機初始化開始（預設）
+  python train_rl.py --init-bc             # 全新但用 bc.pt 熱啟動策略頭（選配）
   python train_rl.py --resume              # 接續 rl_latest.pt
   python train_rl.py --ckpt rl_best.pt     # 從最佳那個接續
   python train_rl.py --ckpt rl_u0020.pt    # 從第 20 次更新的快照接續
@@ -214,6 +218,8 @@ def collect_one_episode(env, ac, device, should_stop):
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--resume", action="store_true", help="接續 rl_latest.pt")
+    ap.add_argument("--init-bc", action="store_true",
+                    help="全新訓練時用 bc.pt 熱啟動策略頭（預設隨機初始化）")
     ap.add_argument("--ckpt", type=str, default=None,
                     help="從指定 checkpoint 接續（路徑或 checkpoints/ 下的檔名），優先於 --resume")
     ap.add_argument("--snapshot-every", type=int, default=10,
@@ -252,7 +258,7 @@ def main():
     update_i, ep_i, best_dmg = 0, 0, -1.0
     best_key = (-1.0, 0, 0.0, 0.0)                 # rl_best 比較鍵；任何真實 eval 都會勝過初值
 
-    # 決定要從哪載入：--ckpt 指定 > --resume(latest) > 從 BC 初始化
+    # 決定要從哪載入：--ckpt 指定 > --resume(latest) > 全新（預設隨機初始化，--init-bc 才載 BC）
     resume_path = None
     if args.ckpt:
         resume_path = args.ckpt if os.path.exists(args.ckpt) \
@@ -277,10 +283,12 @@ def main():
         # rl_best 比較鍵：舊 ckpt 無 best_key → 用 best_dmg 推導（後三項 0，等同舊「只比 avg 傷害」基準）
         best_key = tuple(ck["best_key"]) if "best_key" in ck else (best_dmg, 0, 0.0, 0.0)
         log(f"接續訓練 from {resume_path}：update={update_i} ep={ep_i} best_dmg={best_dmg:.0f}")
-    else:
+    elif args.init_bc:
         bc = torch.load(os.path.join(config.CKPT_DIR, config.BC_CKPT), map_location=device)
         ac.init_from_bc(bc["model"])
-        log(f"從 BC 初始化 (macroF1 {bc['macroF1']:.3f})")
+        log(f"從 BC 熱啟動策略頭 (macroF1 {bc['macroF1']:.3f})")
+    else:
+        log("從隨機初始化開始（未載入 BC；要熱啟動請加 --init-bc）")
 
     ctrl = ControlKeys().start()
 

@@ -1,7 +1,9 @@
 # Hollow Knight AI — 純看畫面打神居大黃蜂
 
 目標：訓練 AI **只看遊戲畫面**（不讀記憶體）打贏神居的大黃蜂（調諧級 Attuned）。
-管線分三階段：**同步錄製 → 行為複製(BC) → 強化學習(PPO 從 BC 微調)**。
+管線分三階段：**同步錄製 → 行為複製(BC，可行性驗證) → 強化學習(PPO 從零訓練)**。
+
+> BC 不是 RL 的起點，是**可行性驗證**：證明「同一條 96×96 疊幀觀測 + 11 鍵動作空間 + 15Hz 決策」這套介面真的能讓模型操作角色。驗證過了，戰鬥策略就交給 PPO **從隨機初始化的權重**、靠 reward 自己學起。
 
 > reward 來自一個 C# mod 透過 UDP 回傳的血量遙測——這只當訓練訊號，**不進模型輸入**，所以「只看畫面」的設定不被破壞。
 
@@ -29,23 +31,26 @@ python record.py            # 4) 同步錄製。F7=開打按(開錄) F8=分勝�
 python inspect_ep.py data/ep0000.npz   #    檢查錄到的畫面+動作對不對
 ```
 
-### 階段 1：行為複製 (BC)
+### 階段 1：行為複製 (BC) — 可行性驗證
+目的不是產出要拿去打王的策略，而是確認「畫面 → 動作」這條路學得起來、介面沒問題。
 ```bash
 python train_bc.py --epochs 30      # 從 data/ 的 demo 學策略 -> checkpoints/bc.pt（存 macroF1 最佳）
 python play_bc.py                   # 載入 bc.pt 實際操作（純看畫面）。F10 停止；F9 暫停
 python play_bc.py --threshold 0.4   # 門檻調低 = AI 更願意按鍵（太被動時用）
 ```
 
-### 階段 2：強化學習 (PPO 從 BC 微調)
+### 階段 2：強化學習 (PPO 從零訓練)
 ```bash
 python env_test.py --episodes 3     # 先驗證 env 自動重開那圈穩定（用 BC 驅動）
-python train_rl.py                  # 從 bc.pt 初始化開始 PPO。F10 安全停止；F9 暫停
+python train_rl.py                  # 隨機初始化開始 PPO。F10 安全停止；F9 暫停
+python train_rl.py --init-bc        # 選配：改用 bc.pt 熱啟動策略頭（預設不載）
 python train_rl.py --resume         # 接續 checkpoints/rl_latest.pt
 python train_rl.py --ckpt rl_best.pt        # 從最佳接續（--ckpt 也吃完整路徑）
 python eval.py                      # 評估 rl_best.pt（決定性出招）。--latest 看最新
 python play_rl.py                   # 看 rl_best.pt 實際打（--latest 看最新）
 ```
 RL 重要行為：
+- **預設不載 BC 權重**，策略從隨機初始化學起；`--init-bc` 才會拿 `bc.pt` 熱啟動策略頭。
 - **梯度更新在 episode 之間做**（人在雕像大廳、非戰鬥），不搶即時 GPU。
 - **rl_best 由決定性 eval 的平均傷害選出**（非訓練取樣 avg_dmg）；`--eval-every` 預設 5、`--eval-episodes` 預設 5。
 - **遙測掉太兇的場會被丟棄**（>50%）不納入更新；reset 失敗不會崩，會跳過該場。
@@ -79,7 +84,7 @@ RL 重要行為：
 | 檔案 | 用途 |
 |---|---|
 | `model.py` | `PolicyNet`：BC 用的 Nature-CNN，輸出 11 鍵各自 logit（多標籤二元）；`act()` 含對向鍵互斥處理 |
-| `ac_model.py` | `ActorCritic`：PPO 用，共用 CNN 分策略/價值頭；`init_from_bc()` 從 bc.pt 熱啟動，動作為 11 個獨立 Bernoulli |
+| `ac_model.py` | `ActorCritic`：PPO 用，共用 CNN 分策略/價值頭；動作為 11 個獨立 Bernoulli。`init_from_bc()` 是選配熱啟動（`--init-bc`），預設不用 |
 | `dataset.py` | `DemoDataset` 載入 demo 配對 (疊幀觀測, 動作)；`split_files()` 切 train/val；疊幀不跨 episode 邊界 |
 
 ### 階段 0 — 錄製
@@ -92,7 +97,7 @@ RL 重要行為：
 ### 階段 1 — BC
 | 檔案 | 用途 |
 |---|---|
-| `train_bc.py` | BC 訓練：多標籤二元(11 sigmoid)，pos_weight 補稀有鍵，每鍵 P/R/F1 評估；存 macroF1 最佳到 `checkpoints/bc.pt` |
+| `train_bc.py` | BC 訓練（可行性驗證）：多標籤二元(11 sigmoid)，pos_weight 補稀有鍵，每鍵 P/R/F1 評估；存 macroF1 最佳到 `checkpoints/bc.pt` |
 | `play_bc.py` | 載入 bc.pt 實際操作遊戲（純看畫面）。F10 停止；F9 暫停 |
 
 ### 階段 2 — RL
@@ -100,7 +105,7 @@ RL 重要行為：
 |---|---|
 | `env.py` | `HollowKnightEnv`：Gym 風格 reset/step。觀測=疊幀畫面、reward=遙測血量變化；reset 自動重開且**失敗不崩**(回 None)，每場統計遙測健康度 |
 | `ppo.py` | `RolloutBuffer`(GAE，正確區分 truncate/terminal) + `ppo_update()` + `RunningMeanStd`（① return-std 正規化：用 raw return 的跑動 std 縮放 reward，穩住 critic、與 curriculum scale 解耦）。`vf_coef=0.25`。與環境解耦，可離線測 |
-| `train_rl.py` | PPO 主訓練：從 bc.pt 初始化、episode 間更新、eval 選 best、CSV 指標、遙測丟棄、F10 停 F9 暫停 |
+| `train_rl.py` | PPO 主訓練：隨機初始化起步（`--init-bc` 可選配 BC 熱啟動）、episode 間更新、eval 選 best、CSV 指標、遙測丟棄、F10 停 F9 暫停 |
 | `eval.py` | 評估某 checkpoint 的真實實力（決定性出招），印勝率/平均/最高傷害 |
 | `play_rl.py` | 載入 RL checkpoint 實際打給你看（決定性） |
 | `env_test.py` | 用 BC 驅動驗證 env 自動重開那圈是否穩定（含實測 Hz） |
@@ -134,7 +139,7 @@ RL 重要行為：
 | 路徑 | 內容 |
 |---|---|
 | `data/epXXXX.npz` (+ `_events.json`) | 錄製的 demo：畫面、動作、遙測、原始按鍵事件 |
-| `checkpoints/bc.pt` | BC 最佳模型 |
+| `checkpoints/bc.pt` | BC 最佳模型（可行性驗證產物；RL 預設不載，僅 `env_test.py` / `--init-bc` 會用） |
 | `checkpoints/rl_latest.pt` / `rl_best.pt` / `rl_uXXXX.pt` | RL 最新 / 最佳(由 eval 選) / 編號快照 |
 | `logs/train_rl.log` | RL 訓練文字 log |
 | `logs/metrics.csv` | 每次 update 一列指標（train/eval 傷害、勝場、loss、entropy、kl、遙測掉包率、難度 scale），用來畫曲線 |

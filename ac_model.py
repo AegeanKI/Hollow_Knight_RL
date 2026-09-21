@@ -1,6 +1,7 @@
 """Actor-Critic 網路（PPO 用）。共用 CNN，分出策略頭與價值頭。
 
-策略頭沿用 BC 的結構，可直接從 bc.pt 載入權重熱啟動；價值頭從頭學。
+策略頭沿用 BC 的結構，**選配**可從 bc.pt 載入權重熱啟動（`train_rl.py --init-bc`）；
+PPO 預設是隨機初始化從頭訓練，BC 只作為階段1 的可行性驗證。
 動作是 11 個獨立 Bernoulli（每鍵按/不按）。
 """
 import torch
